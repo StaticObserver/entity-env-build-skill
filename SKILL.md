@@ -353,16 +353,10 @@ python3 scripts/generate_entity_build_sh.py "$ENTITY_WORKDIR/requirements.json" 
 
 The generated script sources `env.sh`, runs `cmake -B` configure then `cmake --build`, respects all `requirements.compile` options, and fails fast with `set -euo pipefail`.
 
-Then execute (directly or via SLURM):
+Then execute (directly or via SLURM/PBS if on a cluster):
 
 ```bash
 bash entity-build.sh
-
-# Or submit via SLURM:
-python3 scripts/generate_slurm_script.py "$ENTITY_WORKDIR/requirements.json" \
-  --build-script "$ENTITY_WORKDIR/entity-build.sh" \
-  --output "$ENTITY_WORKDIR/submit_entity.sh"
-sbatch "$ENTITY_WORKDIR/submit_entity.sh"
 ```
 
 Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_script.generated_from`, and execution result back to `requirements.json` or a build result section referenced by it.

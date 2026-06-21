@@ -94,15 +94,6 @@ Required shape:
     "logs_dir": "",
     "generated_dir": ""
   },
-  "slurm": {
-    "job_name": "",
-    "partition": "",
-    "nodes": 1,
-    "ntasks_per_node": 1,
-    "cpus_per_task": 8,
-    "gres": "",
-    "time": "01:00:00"
-  },
   "decisions": {},
   "status": {
     "complete": false,
