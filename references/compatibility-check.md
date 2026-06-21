@@ -7,7 +7,7 @@ The check answers one question: can this exact `requirements.json + entity-deps.
 Use the bundled checker first:
 
 ```bash
-python scripts/check_compatibility.py requirements.json --checkpoint entity-deps.local.json
+python3 scripts/entity_compat.py requirements.json --checkpoint entity-deps.local.json
 ```
 
 If the checker cannot evaluate a site-specific condition, add evidence manually to the same result shape rather than bypassing the check.
@@ -37,7 +37,7 @@ Only `status=pass` may continue to `env.sh` generation.
 
 ## 1. Request And Checkpoint Consistency
 
-> **Implementation status: Partial** — `check_compatibility.py` checks `ENTITY_CHECKOUT`/`ENTITY_WORKDIR` mismatch and `requirements.path` existence. Schema version and detailed field-by-field match are not yet automated.
+> **Implementation status: Partial** — `entity_compat.py` checks `ENTITY_CHECKOUT`/`ENTITY_WORKDIR` mismatch and `requirements.path` existence. Schema version and detailed field-by-field match are not yet automated.
 
 Check:
 
@@ -51,7 +51,7 @@ Fail if the checkpoint was produced for a different Entity checkout, workdir, ba
 
 ## 2. Entity Version Profile
 
-> **Implementation status: Implemented** — `check_compatibility.py` validates profile detection, C++ standard, Kokkos/ADIOS2 version-family match, and ADIOS2 Kokkos support mode.
+> **Implementation status: Implemented** — `entity_compat.py` validates profile detection, C++ standard, Kokkos/ADIOS2 version-family match, and ADIOS2 Kokkos support mode.
 
 Derive the expected profile from `requirements.entity.version_bucket` unless `requirements.entity.dependency_profile` explicitly overrides it.
 
@@ -67,7 +67,7 @@ Fail on a version-family mismatch unless the user explicitly confirmed an overri
 
 ## 3. Toolchain Consistency
 
-> **Implementation status: Partial** — `check_compatibility.py` validates that `compiler.cxx`/`cc` paths exist and are executable. Signature consistency across dependencies is not yet compared automatically.
+> **Implementation status: Partial** — `entity_compat.py` validates that `compiler.cxx`/`cc` paths exist and are executable. Signature consistency across dependencies is not yet compared automatically.
 
 Check:
 
@@ -125,7 +125,7 @@ When `requirements.environment.mpi=true`:
 
 ## 6. Dependency Presence And Discovery
 
-> **Implementation status: Implemented** — `check_compatibility.py` validates that `prefix`, `cmake_config`, and `bin` paths exist on disk. Structural completeness (non-empty fields) is checked separately.
+> **Implementation status: Implemented** — `entity_compat.py` validates that `prefix`, `cmake_config`, and `bin` paths exist on disk. Structural completeness (non-empty fields) is checked separately.
 
 For each required dependency, check both files and CMake discovery.
 
@@ -192,7 +192,7 @@ Do not mark compatibility `pass` for a dependency that only has a generated scri
 
 ## 10. Entity Build Readiness
 
-> **Implementation status: Not yet implemented** — Performed implicitly by `generate_entity_build_sh.py` (pgen requirement, CMake option derivation). Not a standalone check in `check_compatibility.py`.
+> **Implementation status: Not yet implemented** — Performed implicitly by `generate_entity_build_sh.py` (pgen requirement, CMake option derivation). Not a standalone check in `entity_compat.py`.
 
 Check:
 

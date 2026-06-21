@@ -1,0 +1,859 @@
+#!/usr/bin/env python3
+"""Generate derived artifacts from JSON state files.
+
+Subcommands:
+  deps   generate dependency source-build scripts
+  env    generate env.sh from entity-deps.local.json
+  build  generate entity-build.sh from requirements.json + env.sh
+"""
+
+import argparse
+import json
+import os
+import shlex
+import sys
+import uuid as _uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from _json_io import (
+    add_json_flag,
+    load_json,
+    protocol_error,
+    protocol_ok,
+    write_json_atomic,
+)
+from _version_profile import (
+    DEFAULT_VERSION_PROFILES,
+    inferred_cxx_standard,
+    requested_version,
+    version_profile as entity_version_profile,
+)
+from entity_schema import (
+    CMAKE_BOOL_MAP,
+    CMAKE_ENV_MAP,
+    CMAKE_VALUE_MAP,
+    DEFAULT_HDF5_VERSION,
+    KOKKOS_BACKEND_FLAGS,
+    SOURCE_BUILD_DEPENDENCIES,
+    OPTIONAL_SOURCE_DEPENDENCIES,
+)
+
+
+# ===========================================================================
+# Shared utilities
+# ===========================================================================
+
+
+def q(value: Any) -> str:
+    return shlex.quote(str(value))
+
+
+def bool_on(value: Any) -> str:
+    return "ON" if bool(value) else "OFF"
+
+
+def unique(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        value = os.path.expanduser(str(value))
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def get_workdir(req: Dict[str, Any]) -> Path:
+    entity = req.get("entity", {})
+    if isinstance(entity, dict) and entity.get("workdir"):
+        return Path(str(entity["workdir"]))
+    env_workdir = os.environ.get("ENTITY_WORKDIR")
+    if env_workdir:
+        return Path(env_workdir)
+    raise SystemExit("requirements.json missing entity.workdir and ENTITY_WORKDIR is unset")
+
+
+# ===========================================================================
+# Shell generation helpers
+# ===========================================================================
+
+
+def shell_export(name: str, value: str) -> str:
+    return f"export {name}={shlex.quote(value)}"
+
+
+def shell_path_export(name: str, values: List[str]) -> str:
+    values = unique(values)
+    if not values:
+        return f"# {name}: no entries generated"
+    joined = ":".join(values)
+    return f"export {name}={shlex.quote(joined)}${{{name}:+:${name}}}"
+
+
+# ===========================================================================
+# Compiler extraction from checkpoint
+# ===========================================================================
+
+
+def selected_compiler(selected: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    compiler = selected.get("compiler", {})
+    kokkos = selected.get("kokkos", {})
+    mpi = selected.get("mpi", {})
+    cc = cxx = host_cxx = ""
+    if isinstance(compiler, dict):
+        cc = str(compiler.get("cc") or compiler.get("c") or "")
+        cxx = str(compiler.get("cxx") or compiler.get("cpp") or "")
+        host_cxx = str(compiler.get("host_cxx") or compiler.get("host_compiler") or "")
+    if not cxx and isinstance(kokkos, dict):
+        cxx = str(kokkos.get("nvcc_wrapper") or "")
+    if not cc and host_cxx:
+        cc = host_cxx
+    mpicxx = ""
+    if isinstance(mpi, dict):
+        mpicxx = str(mpi.get("mpicxx") or "")
+    return cc, cxx, host_cxx or cc, mpicxx
+
+
+def compiler_env(checkpoint: Dict[str, Any]) -> Dict[str, str]:
+    selected = checkpoint.get("selected", {})
+    compiler = selected.get("compiler", {}) if isinstance(selected, dict) else {}
+    mpi = selected.get("mpi", {}) if isinstance(selected, dict) else {}
+    out = {
+        "CC": str(compiler.get("cc") or os.environ.get("CC", "")),
+        "CXX": str(compiler.get("cxx") or os.environ.get("CXX", "")),
+        "HOST_CXX": str(compiler.get("host_cxx") or compiler.get("host_compiler") or ""),
+        "MPICXX": str(mpi.get("mpicxx") or os.environ.get("MPICXX", "")),
+    }
+    if not out["HOST_CXX"]:
+        out["HOST_CXX"] = out["CXX"]
+    return out
+
+
+# ===========================================================================
+# Dependency script generation (used by subcommand: deps)
+# ===========================================================================
+
+
+def script_header(name: str, workdir: Path, prefix: Path, compilers: Dict[str, str]) -> str:
+    lines = [
+        "#!/usr/bin/env bash",
+        f"# Generated dependency build script for {name}. Review before execution.",
+        "set -euo pipefail",
+        'if [ -z "${ENTITY_WORKDIR:-}" ]; then',
+        f"  ENTITY_WORKDIR={q(workdir)}",
+        "fi",
+        "export ENTITY_WORKDIR",
+        'if [ -z "${PREFIX:-}" ]; then',
+        f"  PREFIX={q(prefix)}",
+        "fi",
+        "export PREFIX",
+        'SRC_ROOT="${ENTITY_WORKDIR}/generated/source-trees"',
+        'BUILD_ROOT="${ENTITY_WORKDIR}/generated/source-builds"',
+        'LOG_DIR="${ENTITY_WORKDIR}/build-logs"',
+        "mkdir -p \"$SRC_ROOT\" \"$BUILD_ROOT\" \"$PREFIX\" \"$LOG_DIR\"",
+    ]
+    for key in ("CC", "CXX", "MPICXX"):
+        if compilers.get(key):
+            lines.append(f"export {key}={q(compilers[key])}")
+    if compilers.get("HOST_CXX") and "nvcc_wrapper" in Path(compilers.get("CXX", "")).name:
+        lines.append(f"export NVCC_WRAPPER_DEFAULT_COMPILER={q(compilers['HOST_CXX'])}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _kokkos_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+    env = req.get("environment", {})
+    compilers = compiler_env(checkpoint)
+    prefix = workdir / "deps" / "kokkos"
+    profile = entity_version_profile(req)
+    version = requested_version(req, "kokkos", profile)
+    if not isinstance(env, dict):
+        env = {}
+    backend = str(env.get("backend") or "cpu").lower()
+    arch = str(env.get("gpu_arch") or "")
+    opts = [
+        '-DCMAKE_INSTALL_PREFIX="$PREFIX"',
+        "-DCMAKE_CXX_EXTENSIONS=OFF",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=TRUE",
+        "-DKokkos_ENABLE_SERIAL=ON",
+        "-DKokkos_ENABLE_OPENMP=ON" if backend == "cpu" else "",
+        "-DKokkos_ENABLE_CUDA=ON" if backend == "cuda" else "",
+        "-DKokkos_ENABLE_HIP=ON" if backend == "hip" else "",
+        "-DKokkos_ENABLE_PIC=ON",
+        f"-DCMAKE_CXX_STANDARD={profile['cxx_standard']}",
+    ]
+    if arch:
+        opts.append(f"-DKokkos_ARCH_{arch}=ON" if not arch.startswith("Kokkos_ARCH_") else f"-D{arch}=ON")
+    opts = [opt for opt in opts if opt]
+    cuda_wrapper_block = ""
+    if backend == "cuda":
+        host_cxx = compilers.get("HOST_CXX") or compilers.get("CXX") or "c++"
+        cuda_wrapper_block = f"""
+if [ -z "${{NVCC_WRAPPER_DEFAULT_COMPILER:-}}" ]; then
+  export NVCC_WRAPPER_DEFAULT_COMPILER={q(host_cxx)}
+fi
+export CXX="$SRC/bin/nvcc_wrapper"
+"""
+    return (
+        script_header("kokkos", workdir, prefix, compilers)
+        + f"""
+VERSION="${{KOKKOS_VERSION:-{version}}}"
+SRC="$SRC_ROOT/kokkos-$VERSION"
+BUILD="$BUILD_ROOT/kokkos-$VERSION"
+if [ ! -d "$SRC/.git" ]; then
+  git clone --depth 1 --branch "$VERSION" https://github.com/kokkos/kokkos.git "$SRC"
+fi
+{cuda_wrapper_block}
+cmake -S "$SRC" -B "$BUILD" \\
+  {' '.join(opts)} 2>&1 | tee "$LOG_DIR/kokkos-configure.log"
+cmake --build "$BUILD" -j "${{NCORES:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}}" 2>&1 | tee "$LOG_DIR/kokkos-build.log"
+cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/kokkos-install.log"
+"""
+    )
+
+
+def _hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+    env = req.get("environment", {})
+    compilers = compiler_env(checkpoint)
+    prefix = workdir / "deps" / "hdf5"
+    version = requested_version(req, "hdf5", entity_version_profile(req))
+    mpi_on = bool(env.get("mpi")) if isinstance(env, dict) else False
+    parallel = "-DHDF5_ENABLE_PARALLEL=ON" if mpi_on else "-DHDF5_ENABLE_PARALLEL=OFF"
+    return (
+        script_header("hdf5", workdir, prefix, compilers)
+        + f"""
+VERSION="${{HDF5_VERSION:-{version}}}"
+SRC="$SRC_ROOT/hdf5-$VERSION"
+BUILD="$BUILD_ROOT/hdf5-$VERSION"
+if [ ! -d "$SRC/.git" ]; then
+  git clone --depth 1 --branch "hdf5_$VERSION" https://github.com/HDFGroup/hdf5.git "$SRC"
+fi
+cmake -S "$SRC" -B "$BUILD" \\
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" \\
+  -DHDF5_BUILD_CPP_LIB=ON \\
+  {parallel} 2>&1 | tee "$LOG_DIR/hdf5-configure.log"
+cmake --build "$BUILD" -j "${{NCORES:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}}" 2>&1 | tee "$LOG_DIR/hdf5-build.log"
+cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/hdf5-install.log"
+"""
+    )
+
+
+def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+    env = req.get("environment", {})
+    compilers = compiler_env(checkpoint)
+    prefix = workdir / "deps" / "adios2"
+    profile = entity_version_profile(req)
+    version = requested_version(req, "adios2", profile)
+    if not isinstance(env, dict):
+        env = {}
+    mpi_on = bool(env.get("mpi"))
+    backend = str(env.get("backend") or "cpu").lower()
+    prefix_parts = [str(workdir / "deps" / "hdf5")]
+    if profile["adios2_uses_kokkos"]:
+        prefix_parts.insert(0, str(workdir / "deps" / "kokkos"))
+    cmake_prefix_base = ":".join(prefix_parts)
+    opts = [
+        '-DCMAKE_INSTALL_PREFIX="$PREFIX"',
+        f"-DCMAKE_CXX_STANDARD={profile['cxx_standard']}",
+        "-DCMAKE_CXX_EXTENSIONS=OFF",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=TRUE",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DADIOS2_USE_Python=OFF",
+        "-DADIOS2_USE_Fortran=OFF",
+        "-DADIOS2_USE_ZeroMQ=OFF",
+        "-DBUILD_TESTING=OFF",
+        "-DADIOS2_BUILD_EXAMPLES=OFF",
+        f"-DADIOS2_USE_MPI={'ON' if mpi_on else 'OFF'}",
+        "-DADIOS2_USE_HDF5=ON",
+        f"-DADIOS2_HAVE_HDF5_VOL={'ON' if mpi_on else 'OFF'}",
+        f"-DADIOS2_USE_Kokkos={'ON' if profile['adios2_uses_kokkos'] else 'OFF'}",
+        "-DADIOS2_USE_CUDA=ON" if backend == "cuda" and not profile["adios2_uses_kokkos"] else "",
+    ]
+    opts = [opt for opt in opts if opt]
+    return (
+        script_header("adios2", workdir, prefix, compilers)
+        + f"""
+VERSION="${{ADIOS2_VERSION:-v{version}}}"
+SRC="$SRC_ROOT/ADIOS2-$VERSION"
+BUILD="$BUILD_ROOT/ADIOS2-$VERSION"
+CMAKE_PREFIX_PATH_BASE={q(cmake_prefix_base)}
+export CMAKE_PREFIX_PATH="${{CMAKE_PREFIX_PATH_BASE}}${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+if [ ! -d "$SRC/.git" ]; then
+  git clone --depth 1 --branch "$VERSION" https://github.com/ornladios/ADIOS2.git "$SRC"
+fi
+cmake -S "$SRC" -B "$BUILD" \\
+  {' '.join(opts)} 2>&1 | tee "$LOG_DIR/adios2-configure.log"
+cmake --build "$BUILD" -j "${{NCORES:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}}" 2>&1 | tee "$LOG_DIR/adios2-build.log"
+cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/adios2-install.log"
+"""
+    )
+
+
+def _mpi_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+    compilers = compiler_env(checkpoint)
+    prefix = workdir / "deps" / "openmpi"
+    return (
+        script_header("openmpi", workdir, prefix, compilers)
+        + """
+cat >&2 <<'MSG'
+OpenMPI source build is intentionally not auto-generated yet.
+Prefer a system/module MPI. If source MPI is required, add a reviewed
+OpenMPI+UCX script here and record the reason in entity-deps.local.json.
+MSG
+exit 2
+"""
+    )
+
+
+SCRIPT_FACTORIES = {
+    "kokkos": _kokkos_script,
+    "hdf5": _hdf5_script,
+    "adios2": _adios2_script,
+    "mpi": _mpi_script,
+}
+
+
+def dep_list(value: Optional[str], req: Dict[str, Any]) -> List[str]:
+    if value:
+        deps = [item.strip().lower() for item in value.split(",") if item.strip()]
+        unknown = [dep for dep in deps if dep not in {"kokkos", "hdf5", "adios2", "mpi"}]
+        if unknown:
+            raise SystemExit(f"unsupported dependencies: {', '.join(unknown)}")
+        return deps
+    env = req.get("environment", {})
+    deps = ["kokkos"]
+    if isinstance(env, dict) and env.get("mpi") and env.get("build_mpi_from_source"):
+        deps.insert(0, "mpi")
+    if not isinstance(env, dict) or env.get("output", True):
+        deps.extend(["hdf5", "adios2"])
+    return deps
+
+
+def cmd_deps(args: argparse.Namespace) -> None:
+    req = load_json(args.requirements_json)
+    checkpoint = load_json(args.checkpoint)
+    workdir = get_workdir(req)
+    out_dir = args.output_dir or workdir / "generated" / "source-build-scripts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scripts: Dict[str, Dict[str, str]] = {}
+    profile = entity_version_profile(req)
+    generated: List[str] = []
+    for dep in dep_list(args.deps, req):
+        text = SCRIPT_FACTORIES[dep](req, checkpoint, workdir)
+        path = out_dir / f"build-{dep}.sh"
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+        scripts[dep] = {
+            "path": str(path.resolve()),
+            "status": "generated",
+            "source": "entity-env-build/scripts/entity_generate.py",
+            "based_on": "Entity dependencies.py/wiki dependency generator",
+            "version_profile": str(profile["name"]),
+            "cxx_standard": str(profile["cxx_standard"]),
+            "version": requested_version(req, dep, profile),
+        }
+        if dep == "adios2":
+            scripts[dep]["adios2_uses_kokkos"] = "true" if profile["adios2_uses_kokkos"] else "false"
+        generated.append(str(path.resolve()))
+
+    if not args.no_update_json:
+        build_scripts = checkpoint.setdefault("build_scripts", {})
+        if not isinstance(build_scripts, dict):
+            build_scripts = {}
+            checkpoint["build_scripts"] = build_scripts
+        build_scripts.update({
+            "directory": str(out_dir.resolve()),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "version_profile": str(profile["name"]),
+            "cxx_standard": str(profile["cxx_standard"]),
+            "scripts": scripts,
+        })
+        write_json_atomic(args.checkpoint, checkpoint)
+
+    if args.json:
+        protocol_ok("generate.deps", scripts=generated, count=len(generated))
+
+
+# ===========================================================================
+# env.sh generation (subcommand: env)
+# ===========================================================================
+
+
+def dep_prefixes(selected: Dict[str, Any]) -> List[str]:
+    prefixes: List[str] = []
+    for dep in selected.values():
+        if isinstance(dep, dict):
+            prefix = dep.get("prefix") or dep.get("install_prefix")
+            if prefix:
+                prefixes.append(str(prefix))
+    return unique(prefixes)
+
+
+def dep_bins(selected: Dict[str, Any]) -> List[str]:
+    bins: List[str] = []
+    for dep in selected.values():
+        if isinstance(dep, dict):
+            bin_path = dep.get("bin")
+            if bin_path:
+                p = Path(str(bin_path))
+                bins.append(str(p.parent) if p.is_file() else str(p))
+            prefix = dep.get("prefix") or dep.get("install_prefix")
+            if prefix:
+                bins.append(str(Path(str(prefix)) / "bin"))
+    return unique(bins)
+
+
+def dep_libs(selected: Dict[str, Any]) -> List[str]:
+    libs: List[str] = []
+    for dep in selected.values():
+        if isinstance(dep, dict):
+            lib_path = dep.get("lib")
+            if lib_path:
+                p = Path(str(lib_path))
+                libs.append(str(p.parent) if p.is_file() else str(p))
+            prefix = dep.get("prefix") or dep.get("install_prefix")
+            if prefix:
+                libs.append(str(Path(str(prefix)) / "lib"))
+                libs.append(str(Path(str(prefix)) / "lib64"))
+    return unique(libs)
+
+
+def require_compatibility_pass(data: Dict[str, Any], allow_incomplete: bool) -> None:
+    if allow_incomplete:
+        return
+    compatibility = data.get("compatibility", {})
+    status = str(compatibility.get("status") or "") if isinstance(compatibility, dict) else ""
+    if status != "pass":
+        raise SystemExit(
+            "entity-deps.local.json compatibility.status must be pass before env.sh generation "
+            "(use --allow-incomplete only for debugging)"
+        )
+
+
+def generate_env(data: Dict[str, Any], json_path: Path) -> str:
+    selected = data.get("selected", {})
+    if not isinstance(selected, dict):
+        selected = {}
+    paths = data.get("paths", {})
+    if not isinstance(paths, dict):
+        paths = {}
+
+    prefixes = unique([str(paths.get("ENTITY_DEPS_ROOT") or "")] + dep_prefixes(selected))
+    deps_root = prefixes[0] if prefixes else str(json_path.parent)
+    path_entries = unique([*(paths.get("PATH") or []), *dep_bins(selected)])
+    cmake_entries = unique([*(paths.get("CMAKE_PREFIX_PATH") or []), *dep_prefixes(selected)])
+    ld_entries = unique([*(paths.get("LD_LIBRARY_PATH") or []), *dep_libs(selected)])
+    dyld_entries = unique([*(paths.get("DYLD_LIBRARY_PATH") or [])])
+
+    cc, cxx, host_cxx, mpicxx = selected_compiler(selected)
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Generated from entity-deps.local.json. Do not edit by hand.",
+        "set -euo pipefail",
+        shell_export("ENTITY_DEPS_JSON", str(json_path.resolve())),
+        shell_export("ENTITY_DEPS_ROOT", deps_root),
+    ]
+
+    # Pre-commands
+    pre_commands = paths.get("pre_commands", []) if isinstance(paths, dict) else []
+    if isinstance(pre_commands, list) and pre_commands:
+        lines.append("")
+        lines.append("# Site-specific pre-commands from entity-deps.local.json")
+        lines.extend(str(cmd) for cmd in pre_commands if cmd)
+
+    # Modules
+    modules = paths.get("modules", []) if isinstance(paths, dict) else []
+    if isinstance(modules, list) and modules:
+        lines.append("")
+        lines.append("# --- Modules ---")
+        lines.append("if command -v module &>/dev/null; then")
+        for mod in modules:
+            if mod:
+                lines.append(f"  module load {shlex.quote(str(mod))}")
+        lines.append("fi")
+
+    lines.extend([
+        shell_path_export("PATH", path_entries),
+        shell_path_export("CMAKE_PREFIX_PATH", cmake_entries),
+        shell_path_export("LD_LIBRARY_PATH", ld_entries),
+    ])
+    if dyld_entries:
+        lines.append(shell_path_export("DYLD_LIBRARY_PATH", dyld_entries))
+    if cc:
+        lines.append(shell_export("CC", cc))
+    if cxx:
+        lines.append(shell_export("CXX", cxx))
+    if "nvcc_wrapper" in Path(cxx).name and host_cxx:
+        lines.append(shell_export("NVCC_WRAPPER_DEFAULT_COMPILER", host_cxx))
+    if mpicxx:
+        lines.append(shell_export("MPICXX", mpicxx))
+
+    # Extra env overrides
+    extra_env = paths.get("extra_env", {}) if isinstance(paths, dict) else {}
+    if isinstance(extra_env, dict) and extra_env:
+        lines.append("")
+        lines.append("# Site-specific environment overrides from entity-deps.local.json")
+        for var, val in extra_env.items():
+            if val:
+                lines.append(shell_export(str(var), str(val)))
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def default_env_path(data: Dict[str, Any], json_path: Path) -> Path:
+    env_sh = data.get("env_sh", {})
+    if isinstance(env_sh, dict) and env_sh.get("path"):
+        return Path(str(env_sh["path"]))
+    artifacts = data.get("artifacts", {})
+    if isinstance(artifacts, dict) and artifacts.get("env_sh"):
+        return Path(str(artifacts["env_sh"]))
+    requirements = data.get("requirements", {})
+    if isinstance(requirements, dict):
+        entity = requirements.get("entity", {})
+        if isinstance(entity, dict) and entity.get("workdir"):
+            return Path(str(entity["workdir"])) / "env.sh"
+    env_workdir = os.environ.get("ENTITY_WORKDIR")
+    if env_workdir:
+        return Path(env_workdir) / "env.sh"
+    return json_path.parent / "env.sh"
+
+
+def cmd_env(args: argparse.Namespace) -> None:
+    data = load_json(args.json_path)
+    require_compatibility_pass(data, args.allow_incomplete)
+    if args.output is None:
+        args.output = default_env_path(data, args.json_path)
+    script = generate_env(data, args.json_path)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(script, encoding="utf-8")
+    args.output.chmod(0o755)
+
+    if not args.no_update_json:
+        env_sh = data.setdefault("env_sh", {})
+        if not isinstance(env_sh, dict):
+            env_sh = {}
+            data["env_sh"] = env_sh
+        env_sh.update({
+            "path": str(args.output.resolve()),
+            "status": "generated",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_from_checkpoint": str(args.json_path.resolve()),
+            "validation": {"bash_syntax": "not_run", "commands": []},
+        })
+        write_json_atomic(args.json_path, data)
+
+    if args.json:
+        protocol_ok("generate.env", output=str(args.output.resolve()))
+
+
+# ===========================================================================
+# entity-build.sh generation (subcommand: build)
+# ===========================================================================
+
+
+def cmake_options(req: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    env = req.get("environment", {})
+    compile_cfg = req.get("compile", {})
+    pgen = compile_cfg.get("pgen")
+    pgens = compile_cfg.get("pgens")
+    if not pgen and not pgens:
+        raise SystemExit("requirements.json missing required field: compile.pgen or compile.pgens")
+
+    opts: List[str] = []
+    # pgen
+    if pgen:
+        opts.append(f"-Dpgen={pgen}")
+    else:
+        pgens_val = ",".join(str(item) for item in pgens) if isinstance(pgens, list) else str(pgens)
+        opts.append(f"-Dpgens={pgens_val}")
+
+    # Value-mapped options from entity_schema.py
+    for json_key, cmake_key in CMAKE_VALUE_MAP.items():
+        val = compile_cfg.get(json_key, "")
+        if val:
+            opts.append(f"-D{cmake_key}={val}")
+
+    # Bool-mapped options
+    for json_key, cmake_key in CMAKE_BOOL_MAP.items():
+        opts.append(f"-D{cmake_key}={bool_on(compile_cfg.get(json_key, False))}")
+
+    # Environment-mapped options
+    for json_key, cmake_key in CMAKE_ENV_MAP.items():
+        opts.append(f"-D{cmake_key}={bool_on(env.get(json_key, False))}")
+
+    # C++ standard
+    opts.append(f"-DCMAKE_CXX_STANDARD={inferred_cxx_standard(req)}")
+
+    # Backend
+    backend = str(env.get("backend") or "cpu").lower()
+    gpu_arch = str(env.get("gpu_arch") or "")
+    if backend in KOKKOS_BACKEND_FLAGS:
+        opts.append(f"-D{KOKKOS_BACKEND_FLAGS[backend]}=ON")
+    if gpu_arch:
+        flag = f"-D{gpu_arch}=ON" if gpu_arch.startswith("Kokkos_ARCH_") else f"-DKokkos_ARCH_{gpu_arch}=ON"
+        opts.append(flag)
+
+    # CXX flags
+    cmake_cxx_flags = compile_cfg.get("cmake_cxx_flags", "")
+    if cmake_cxx_flags:
+        opts.append(f'-DCMAKE_CXX_FLAGS={shlex.quote(str(cmake_cxx_flags))}')
+
+    # Install
+    install_prefix = compile_cfg.get("install_prefix")
+    if compile_cfg.get("install") and install_prefix:
+        opts.append(f"-DCMAKE_INSTALL_PREFIX={install_prefix}")
+
+    # Extra options
+    for extra in compile_cfg.get("extra_cmake_options") or []:
+        opts.append(str(extra))
+
+    # Shell-raw options (compiler from env vars)
+    raw_shell_opts: List[str] = [
+        '-DCMAKE_CXX_COMPILER="${CXX}"',
+        '-DCMAKE_C_COMPILER="${CC}"',
+    ]
+
+    return opts, raw_shell_opts
+
+
+def require_string(obj: Dict[str, Any], path: str) -> str:
+    cur: Any = obj
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            raise SystemExit(f"requirements.json missing required field: {path}")
+        cur = cur[part]
+    if cur in (None, ""):
+        raise SystemExit(f"requirements.json field is empty: {path}")
+    return str(cur)
+
+
+def default_build_dir(req: Dict[str, Any]) -> str:
+    compile_cfg = req.get("compile", {})
+    env = req.get("environment", {})
+    entity = req.get("entity", {})
+    workdir = ""
+    if isinstance(entity, dict):
+        workdir = str(entity.get("workdir") or "")
+    if not workdir:
+        workdir = os.environ.get("ENTITY_WORKDIR", "")
+    if not workdir:
+        raise SystemExit("requirements.json missing required field: entity.workdir")
+    pgen_value = compile_cfg.get("pgen") or compile_cfg.get("pgens") or "entity"
+    if isinstance(pgen_value, list):
+        pgen = ",".join(str(item) for item in pgen_value)
+    else:
+        pgen = str(pgen_value)
+    backend = str(env.get("backend") or "cpu")
+    mpi = "mpi" if env.get("mpi") else "serial"
+    intent = str(compile_cfg.get("build_intent") or "build")
+    safe = "-".join([pgen.replace("/", "-"), backend, mpi, intent])
+    return str(Path(workdir) / "build" / safe)
+
+
+def _verify_checkpoint_gate(checkpoint: Dict[str, Any], env_sh: Path) -> None:
+    compat = checkpoint.get("compatibility", {})
+    if not isinstance(compat, dict):
+        raise SystemExit("entity-deps.local.json missing compatibility section")
+    if compat.get("status") != "pass":
+        raise SystemExit(
+            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass'. "
+            f"Run entity_compat.py first."
+        )
+    checkpoint_env = checkpoint.get("env_sh", {})
+    if isinstance(checkpoint_env, dict):
+        recorded_path = checkpoint_env.get("path", "")
+        if recorded_path and Path(recorded_path).resolve() != env_sh.resolve():
+            print(
+                f"WARNING: checkpoint env_sh.path ({recorded_path}) differs from "
+                f"--env argument ({env_sh}). The env.sh may be stale.",
+                file=sys.stderr,
+            )
+
+
+def shell_command(parts: List[str]) -> str:
+    return " ".join(q(part) for part in parts)
+
+
+def generate_build_script(
+    req: Dict[str, Any], req_path: Path, env_sh: Path, run_id: str
+) -> Tuple[str, Dict[str, str]]:
+    checkout = require_string(req, "entity.checkout_root")
+    workdir = require_string(req, "entity.workdir")
+    compile_cfg = req.setdefault("compile", {})
+    build_dir = str(compile_cfg.get("build_dir") or default_build_dir(req))
+    compile_cfg["build_dir"] = build_dir
+    compile_cfg["cxx_standard"] = inferred_cxx_standard(req)
+    jobs = str(compile_cfg.get("jobs") or "")
+    run_id_q = q(run_id)
+
+    fixed_opts, raw_shell_opts = cmake_options(req)
+    configure_cmd = shell_command(["cmake", "-B", build_dir, *fixed_opts])
+    if raw_shell_opts:
+        configure_cmd += " " + " ".join(raw_shell_opts)
+    build_parts = ["cmake", "--build", build_dir]
+    if jobs:
+        build_parts.extend(["-j", jobs])
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Generated from requirements.json and env.sh. Do not edit by hand.",
+        "set -euo pipefail",
+        f"source {q(env_sh.resolve())}",
+        f"LOG_DIR={q(Path(workdir) / 'build-logs')}",
+        "mkdir -p \"$LOG_DIR\"",
+        f"cd {q(checkout)}",
+        "# -- cmake configure --",
+        f"{configure_cmd} 2>&1 | tee \"$LOG_DIR/entity-configure.log\"",
+        f"echo '{{\"ts\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"run\":{run_id_q},\"action\":\"build.configure\",\"script\":\"entity-build.sh\",\"status\":\"ok\"}}' >> ~/.entity-env-build/run.log",
+        "# -- cmake build --",
+        f"{shell_command(build_parts)} 2>&1 | tee \"$LOG_DIR/entity-build.log\"",
+        f"echo '{{\"ts\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"run\":{run_id_q},\"action\":\"build.compile\",\"script\":\"entity-build.sh\",\"status\":\"ok\"}}' >> ~/.entity-env-build/run.log",
+    ]
+    if compile_cfg.get("tests"):
+        lines.append(shell_command(["ctest", "--test-dir", build_dir, "--output-on-failure"]))
+    if compile_cfg.get("install"):
+        lines.append(shell_command(["cmake", "--install", build_dir]))
+    lines.append("")
+
+    meta = {
+        "configure_command": configure_cmd,
+        "build_command": shell_command(build_parts),
+        "expected_executable": str(Path(checkout) / build_dir / "src" / "entity.xc"),
+    }
+    return "\n".join(lines), meta
+
+
+def cmd_build(args: argparse.Namespace) -> None:
+    req = load_json(args.requirements_json)
+    if not args.env.exists():
+        msg = f"env.sh not found: {args.env}"
+        if args.json:
+            protocol_error("generate.build", msg)
+        raise SystemExit(msg)
+
+    if args.checkpoint:
+        if not args.checkpoint.exists():
+            msg = f"entity-deps.local.json not found: {args.checkpoint}"
+            if args.json:
+                protocol_error("generate.build", msg)
+            raise SystemExit(msg)
+        checkpoint = load_json(args.checkpoint)
+        _verify_checkpoint_gate(checkpoint, args.env.resolve())
+        env_fingerprint = (
+            checkpoint.get("env_sh", {}).get("generated_at", "")
+            if isinstance(checkpoint.get("env_sh"), dict)
+            else ""
+        )
+    else:
+        print(
+            "WARNING: --checkpoint not provided. Skipping compatibility gate validation. "
+            "Use --checkpoint for production builds.",
+            file=sys.stderr,
+        )
+        env_fingerprint = ""
+
+    run_id = getattr(args, '_run_id', None) or _uuid.uuid4().hex[:8]
+
+    if args.output is None:
+        artifacts = req.get("artifacts", {})
+        if isinstance(artifacts, dict) and artifacts.get("entity_build_sh"):
+            args.output = Path(str(artifacts["entity_build_sh"]))
+        else:
+            workdir = require_string(req, "entity.workdir")
+            args.output = Path(workdir) / "entity-build.sh"
+
+    script, meta = generate_build_script(req, args.requirements_json, args.env, run_id)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(script, encoding="utf-8")
+    args.output.chmod(0o755)
+
+    if not args.no_update_json:
+        artifacts = req.setdefault("artifacts", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+            req["artifacts"] = artifacts
+        artifacts["entity_build_sh"] = str(args.output.resolve())
+        build_script = req.setdefault("entity_build_script", {})
+        if not isinstance(build_script, dict):
+            build_script = {}
+            req["entity_build_script"] = build_script
+        build_script.update({
+            "path": str(args.output.resolve()),
+            "status": "generated",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_from": {
+                "requirements_json": str(args.requirements_json.resolve()),
+                "env_sh": str(args.env.resolve()),
+                "env_fingerprint": env_fingerprint,
+                "checkpoint_json": str(args.checkpoint.resolve()) if args.checkpoint else "",
+            },
+        })
+        result = req.setdefault("build_result", {})
+        if not isinstance(result, dict):
+            result = {}
+            req["build_result"] = result
+        result.update({"status": "not_run", **meta})
+        write_json_atomic(args.requirements_json, req)
+
+    if args.json:
+        protocol_ok("generate.build", output=str(args.output.resolve()))
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    # --- deps ---
+    p_deps = sub.add_parser("deps", help="Generate dependency source-build scripts")
+    p_deps.add_argument("requirements_json", type=Path)
+    p_deps.add_argument("--checkpoint", type=Path, required=True)
+    p_deps.add_argument("--deps", help="Comma-separated deps: mpi,kokkos,hdf5,adios2")
+    p_deps.add_argument("--output-dir", type=Path)
+    p_deps.add_argument("--no-update-json", action="store_true")
+    add_json_flag(p_deps)
+
+    # --- env ---
+    p_env = sub.add_parser("env", help="Generate env.sh from entity-deps.local.json")
+    p_env.add_argument("json_path", type=Path)
+    p_env.add_argument("--output", type=Path)
+    p_env.add_argument("--allow-incomplete", action="store_true")
+    p_env.add_argument("--no-update-json", action="store_true")
+    add_json_flag(p_env)
+
+    # --- build ---
+    p_build = sub.add_parser("build", help="Generate entity-build.sh from requirements.json + env.sh")
+    p_build.add_argument("requirements_json", type=Path)
+    p_build.add_argument("--env", type=Path, required=True)
+    p_build.add_argument("--checkpoint", type=Path, help="entity-deps.local.json for gate validation")
+    p_build.add_argument("--output", type=Path)
+    p_build.add_argument("--no-update-json", action="store_true")
+    p_build.add_argument("--run-id", help="Run ID for event log (auto-generated if omitted)")
+    add_json_flag(p_build)
+
+    args = parser.parse_args()
+
+    # Inject run_id for build subcommand
+    if args.subcommand == "build":
+        args._run_id = getattr(args, 'run_id', None) or _uuid.uuid4().hex[:8]
+
+    if args.subcommand == "deps":
+        cmd_deps(args)
+    elif args.subcommand == "env":
+        cmd_env(args)
+    elif args.subcommand == "build":
+        cmd_build(args)
+
+
+if __name__ == "__main__":
+    main()

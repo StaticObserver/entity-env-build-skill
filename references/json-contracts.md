@@ -2,6 +2,8 @@
 
 Use this reference when creating, repairing, or validating `requirements.json` and `entity-deps.local.json`.
 
+**Authoritative schema source**: `scripts/entity_schema.py` — this document is the human-readable mirror. When they differ, the Python file is the source of truth.
+
 ## File Roles
 
 `requirements.json` is the source of truth for the current Entity build request. It changes when the user changes backend, MPI, output, PGen, debug/test intent, build directory, install choice, or other compile options.
@@ -229,7 +231,7 @@ Each string is emitted verbatim as a shell line. Use sparingly — prefer dedica
 
 ## Extra Environment Variables
 
-Site-specific environment variables that `generate_env_sh.py` should write into `env.sh` can be recorded under `paths.extra_env`:
+Site-specific environment variables that `entity_generate.py env` should write into `env.sh` can be recorded under `paths.extra_env`:
 
 ```json
 {
@@ -284,7 +286,7 @@ MPI-specific selected fields:
 
 `compatibility.status=pass` requires:
 
-- `scripts/check_compatibility.py` has written the latest compatibility result;
+- `scripts/entity_compat.py` has written the latest compatibility result;
 - current `requirements.json` is represented in `entity-deps.local.json.requirements`;
 - required dependencies are selected;
 - selected C++ standard, Kokkos family, ADIOS2 family, and ADIOS2 Kokkos support match the Entity version profile;
@@ -300,7 +302,7 @@ Use `partial` only for non-blocking issues explicitly safe before Entity build.
 Run:
 
 ```bash
-python scripts/check_compatibility.py requirements.json --checkpoint entity-deps.local.json
+python3 scripts/entity_compat.py requirements.json --checkpoint entity-deps.local.json
 ```
 
 ## Generated Artifacts

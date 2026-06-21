@@ -1,50 +1,19 @@
 """Shared Entity version profile logic.
 
-Used by check_compatibility.py, generate_dependency_build_scripts.py,
-and generate_entity_build_sh.py to avoid duplicating the legacy/modern
-profile derivation and version-family constants.
+Used by entity_compat.py and entity_generate.py to avoid duplicating
+the legacy/modern profile derivation.
+
+Profile constants live in entity_schema.py (single source of truth).
 """
 
+import sys
 from typing import Any, Dict, Tuple
 
+from entity_schema import PROFILES, DEFAULT_HDF5_VERSION
+from entity_schema import DEFAULT_VERSION_PROFILES as _DEFAULT_VERSION_PROFILES
 
-PROFILES: Dict[str, Dict[str, Any]] = {
-    "legacy": {
-        "cxx_standard": "17",
-        "kokkos": "4.",
-        "adios2": "2.10.",
-        "adios2_uses_kokkos": False,
-    },
-    "modern": {
-        "cxx_standard": "20",
-        "kokkos": "5.",
-        "adios2": "2.11.",
-        "adios2_uses_kokkos": True,
-    },
-}
 
-DEFAULT_VERSION_PROFILES: Dict[str, Dict[str, Any]] = {
-    "legacy": {
-        "name": "legacy",
-        "cxx_standard": "17",
-        "kokkos_family": "4.x",
-        "kokkos_default": "",
-        "adios2_family": "2.10.x",
-        "adios2": "2.10.2",
-        "adios2_uses_kokkos": False,
-    },
-    "modern": {
-        "name": "modern",
-        "cxx_standard": "20",
-        "kokkos_family": "5.x",
-        "kokkos_default": "5.0.1",
-        "adios2_family": "2.11.x",
-        "adios2": "2.11.0",
-        "adios2_uses_kokkos": True,
-    },
-}
-
-DEFAULT_HDF5_VERSION = "1.14.6"
+DEFAULT_VERSION_PROFILES = _DEFAULT_VERSION_PROFILES  # re-export
 
 
 def detect_profile_name(req: Dict[str, Any]) -> str:

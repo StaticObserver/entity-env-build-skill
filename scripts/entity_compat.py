@@ -3,36 +3,20 @@
 
 Implements checks described in references/compatibility-check.md.
 Sections referenced in comments map to that document.
+
+Renamed from check_compatibility.py — logic unchanged.
 """
 
 import argparse
 import json
 import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from _json_io import add_json_flag, load_json, protocol_error, protocol_ok, write_json_atomic
 from _version_profile import profile_for
-
-
-def load_json(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise SystemExit(f"{path} must contain a JSON object")
-    return data
-
-
-def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
-    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, delete=False
-    ) as f:
-        f.write(text)
-        tmp = Path(f.name)
-    tmp.replace(path)
 
 
 def add(
@@ -176,7 +160,7 @@ def validate_compiler_executable(
 
 
 # ---------------------------------------------------------------------------
-# Compatibility helpers (unchanged logic from original)
+# Compatibility helpers
 # ---------------------------------------------------------------------------
 
 
@@ -219,12 +203,7 @@ def selected_entry(checkpoint: Dict[str, Any], dep: str) -> Dict[str, Any]:
 
 
 def has_installed_dependency(checkpoint: Dict[str, Any], dep: str) -> bool:
-    """Return True when *dep* has a usable entry with existing paths.
-
-    This is a structural check; path-existence validation is done
-    separately by validate_dependency_paths() during the dependency check
-    pass so each failure gets its own check item with remediation.
-    """
+    """Return True when *dep* has a usable entry with existing paths."""
     entry = selected_entry(checkpoint, dep)
     if not entry:
         return False
@@ -241,12 +220,7 @@ def has_installed_dependency(checkpoint: Dict[str, Any], dep: str) -> bool:
 
 
 def _read_cmake_config_var(cmake_config_path: Path, var_name: str) -> Optional[str]:
-    """Extract a set() variable value from a CMake config file.
-
-    Looks for patterns like:
-        set(ROCM_PATH "/path/to/rocm")
-        set(CMAKE_CXX_COMPILER "/path/to/compiler")
-    """
+    """Extract a set() variable value from a CMake config file."""
     if not cmake_config_path.is_file():
         return None
     try:
@@ -254,7 +228,6 @@ def _read_cmake_config_var(cmake_config_path: Path, var_name: str) -> Optional[s
     except OSError:
         return None
 
-    # Match: set(VAR_NAME "value") or set(VAR_NAME value)
     pat = re.compile(
         rf"^\s*set\s*\(\s*{re.escape(var_name)}\s+(?:\"([^\"]*)\"|(\S+))\s*\)",
         re.MULTILINE,
@@ -283,7 +256,7 @@ def _cross_check_kokkos_compiler(
             checks,
             "cross.kokkos_compiler_consistency",
             "warn",
-            "Cannot read Kokkos CMake config to verify compiler consistency — unable to check ABI compatibility",
+            "Cannot read Kokkos CMake config to verify compiler consistency",
             {},
             remediation="Verify manually that Kokkos was built with the same compiler family (GCC/Clang/hipcc) selected for Entity.",
         )
@@ -295,7 +268,7 @@ def _cross_check_kokkos_compiler(
             checks,
             "cross.kokkos_compiler_consistency",
             "warn",
-            "Kokkos CMake config found but CMAKE_CXX_COMPILER not recorded — unable to verify compiler ABI consistency",
+            "Kokkos CMake config found but CMAKE_CXX_COMPILER not recorded",
             {"kokkos_config": str(kokkos_config)},
             remediation="Verify manually that Kokkos was built with the same compiler family selected for Entity.",
         )
@@ -305,7 +278,6 @@ def _cross_check_kokkos_compiler(
     kokkos_cxx_basename = Path(kokkos_cxx).name
     selected_cxx_basename = Path(selected_cxx).name if selected_cxx else ""
 
-    # Heuristic: hipcc vs GCC vs Clang
     kokkos_is_hip = "hipcc" in kokkos_cxx_basename or "nvcc_wrapper" in kokkos_cxx_basename
     selected_is_hip = "hipcc" in selected_cxx_basename or "nvcc_wrapper" in selected_cxx_basename
 
@@ -357,7 +329,6 @@ def _cross_check_gpu_toolkit_consistency(
     gpu_prefix = str(gpu_toolkit.get("prefix") or "")
 
     if backend == "hip":
-        # Compare ROCM_PATH recorded in Kokkos config with selected gpu_toolkit
         kokkos_rocm = _read_cmake_config_var(kokkos_config, "ROCM_PATH")
         if kokkos_rocm and gpu_prefix:
             kokkos_rocm_path = Path(kokkos_rocm).resolve()
@@ -422,7 +393,6 @@ def _cross_check_mpi_consistency(
     except OSError:
         pass
 
-    # Check each output dependency's MPI linkage via cmake config records
     for dep_name, dep_entry in (("adios2", adios2_entry), ("hdf5", hdf5_entry)):
         if not dep_entry:
             continue
@@ -448,13 +418,7 @@ def run_cross_checks(
     req: Dict[str, Any],
     checkpoint: Dict[str, Any],
 ) -> None:
-    """Run cross-dependency toolchain consistency checks.
-
-    Validates that the selected dependencies form a compatible set:
-    - Kokkos compiler ABI matches the selected compiler
-    - GPU toolkit (DTK/ROCm or CUDA) version matches what Kokkos was built with
-    - MPI implementation is consistent across ADIOS2, HDF5, and the selected MPI
-    """
+    """Run cross-dependency toolchain consistency checks."""
     selected = checkpoint.get("selected", {})
     if not isinstance(selected, dict):
         return
@@ -494,7 +458,6 @@ def run_checks(
     issues: List[str] = []
 
     # -- Section 1: Request / checkpoint consistency ------------------------
-    # (ref: compatibility-check.md section 1)
     req_path = (
         checkpoint.get("requirements", {}).get("path", "")
         if isinstance(checkpoint.get("requirements"), dict)
@@ -541,7 +504,6 @@ def run_checks(
         issues.append("ENTITY_WORKDIR differs between requirements.json and checkpoint")
 
     # -- Section 2: Entity version profile ----------------------------------
-    # (ref: compatibility-check.md section 2)
     try:
         profile_name, profile = profile_for(req)
         add(
@@ -626,7 +588,6 @@ def run_checks(
         issues.append("ADIOS2 Kokkos mode does not match profile")
 
     # -- Section 3: Toolchain consistency -----------------------------------
-    # (ref: compatibility-check.md section 3)
     selected = checkpoint.get("selected", {})
     compiler = selected.get("compiler", {}) if isinstance(selected, dict) else {}
     compiler_ok = isinstance(compiler, dict) and bool(compiler.get("cxx"))
@@ -644,7 +605,6 @@ def run_checks(
         validate_compiler_executable(checks, issues, compiler)
 
     # -- Section 4: Backend check -------------------------------------------
-    # (ref: compatibility-check.md section 4)
     env = req.get("environment", {})
     backend = (
         str(env.get("backend") or "cpu").lower() if isinstance(env, dict) else "cpu"
@@ -708,8 +668,7 @@ def run_checks(
                 )
                 issues.append(f"GPU toolkit prefix not found: {tk_prefix}")
 
-    # -- Section 5-6: Dependency presence with path validation ---------------
-    # (ref: compatibility-check.md sections 5,6)
+    # -- Section 5-6: Dependency presence with path validation --------------
     required = ["kokkos"]
     if isinstance(env, dict) and env.get("output", True):
         required.extend(["hdf5", "adios2"])
@@ -729,9 +688,7 @@ def run_checks(
             )
             issues.append(f"{dep} is not selected")
             continue
-        # Path existence validation (the core P0 fix):
         validate_dependency_paths(checks, issues, dep, entry)
-        # Structural completeness:
         if not has_installed_dependency(checkpoint, dep):
             add(
                 checks,
@@ -745,18 +702,10 @@ def run_checks(
             if dep not in [i for i in issues]:
                 issues.append(f"{dep} is missing installed/discoverable evidence")
 
-    # -- Section 7: ADIOS2 / HDF5 / Kokkos mode compatibility ---------------
-    # (ref: compatibility-check.md section 7)
-    # MPI consistency across ADIOS2 and HDF5 is checked implicitly above;
-    # per-package checks (ADIOS2_USE_Kokkos vs CUDA) are in Section 4.
-
-    # -- Section 8: Cross-dependency toolchain consistency -------------------
-    # Verify that the selected dependencies form a compatible set:
-    # Kokkos compiler ABI, GPU toolkit version, MPI implementation consistency.
+    # -- Section 7: Cross-dependency toolchain consistency -------------------
     run_cross_checks(checks, issues, req, checkpoint)
 
-    # -- Section 9: Source-build script readiness ---------------------------
-    # (ref: compatibility-check.md section 9)
+    # -- Section 8: Source-build script readiness ---------------------------
     source_scripts = checkpoint.get("build_scripts", {}).get("scripts", {})
     if isinstance(source_scripts, dict):
         for dep, script in source_scripts.items():
@@ -786,6 +735,7 @@ def main() -> None:
     parser.add_argument("requirements_json", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--no-update-json", action="store_true")
+    add_json_flag(parser)
     args = parser.parse_args()
 
     req = load_json(args.requirements_json)
@@ -800,9 +750,26 @@ def main() -> None:
     if not args.no_update_json:
         checkpoint["compatibility"] = compatibility
         write_json_atomic(args.checkpoint, checkpoint)
-    print(json.dumps(compatibility, indent=2, sort_keys=True))
-    if status != "pass":
-        raise SystemExit(1)
+
+    if args.json:
+        if status != "pass":
+            protocol_error(
+                "compatibility_check",
+                f"{len(issues)} issue(s) found",
+                result=status,
+                issues_count=len(issues),
+                checks_count=len(checks),
+            )
+        protocol_ok(
+            "compatibility_check",
+            result=status,
+            checks_count=len(checks),
+            issues_count=len(issues),
+        )
+    else:
+        print(json.dumps(compatibility, indent=2, sort_keys=True))
+        if status != "pass":
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

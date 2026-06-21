@@ -21,26 +21,37 @@
 主要脚本：
 
 ```text
-scripts/check_compatibility.py
-scripts/generate_dependency_build_scripts.py
-scripts/generate_env_sh.py
-scripts/generate_entity_build_sh.py
+scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_compat.py       ← compatibility check
+scripts/entity_generate.py     ← deps / env / build 生成
 ```
 
 典型顺序：
 
 ```bash
-python scripts/generate_dependency_build_scripts.py requirements.json \
-  --checkpoint entity-deps.local.json
+# Phase 1: Validate requirements
+python3 scripts/entity_checkpoint.py validate "$ENTITY_WORKDIR/requirements.json"
 
-python scripts/check_compatibility.py requirements.json \
-  --checkpoint entity-deps.local.json
+# Phase 2: Create checkpoint
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
 
-python scripts/generate_env_sh.py entity-deps.local.json \
+# Dependency source-build scripts (if needed)
+python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Compatibility check
+python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Generate env.sh
+python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/env.sh"
 
-python scripts/generate_entity_build_sh.py requirements.json \
+# Phase 3: Generate entity-build.sh
+python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --env "$ENTITY_WORKDIR/env.sh" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/entity-build.sh"
 ```
 
@@ -67,26 +78,37 @@ Core constraints:
 Main scripts:
 
 ```text
-scripts/check_compatibility.py
-scripts/generate_dependency_build_scripts.py
-scripts/generate_env_sh.py
-scripts/generate_entity_build_sh.py
+scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_compat.py       ← compatibility check
+scripts/entity_generate.py     ← deps / env / build generation
 ```
 
 Typical sequence:
 
 ```bash
-python scripts/generate_dependency_build_scripts.py requirements.json \
-  --checkpoint entity-deps.local.json
+# Phase 1: Validate requirements
+python3 scripts/entity_checkpoint.py validate "$ENTITY_WORKDIR/requirements.json"
 
-python scripts/check_compatibility.py requirements.json \
-  --checkpoint entity-deps.local.json
+# Phase 2: Create checkpoint
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
 
-python scripts/generate_env_sh.py entity-deps.local.json \
+# Dependency source-build scripts (if needed)
+python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Compatibility check
+python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Generate env.sh
+python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/env.sh"
 
-python scripts/generate_entity_build_sh.py requirements.json \
+# Phase 3: Generate entity-build.sh
+python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --env "$ENTITY_WORKDIR/env.sh" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/entity-build.sh"
 ```
 

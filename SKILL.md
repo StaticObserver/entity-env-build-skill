@@ -59,9 +59,10 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 - Entity versions newer than `1.4.x` require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; Entity `1.4.x` and older use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`.
 - Only the `Kokkos 5.x + ADIOS2 2.11.x` profile builds ADIOS2 with Kokkos support. Other profiles must not add Kokkos as an ADIOS2 dependency unless the user explicitly overrides the profile.
 - For CUDA backend builds, use Kokkos `nvcc_wrapper` as the C++ compiler, usually from `Kokkos source/install prefix/bin/nvcc_wrapper`. Record both wrapper path and host compiler.
-- For source builds, generate local scripts with `scripts/generate_dependency_build_scripts.py`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
+- For source builds, generate local scripts with `scripts/entity_generate.py deps`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
 - Do not enter Entity source compilation until compatibility is `pass` and `env.sh` is generated from `entity-deps.local.json`.
 - Do not hand-write the Entity configure/build commands. Generate `entity-build.sh` from `requirements.json` and `env.sh`, then execute it.
+- On clusters: NEVER compile on login nodes. Always submit Entity builds through the scheduler (SLURM/PBS), or ask the user if no scheduler is available. The only exception is when the user explicitly requests a login-node build.
 
 ## Build Workflow
 
@@ -75,6 +76,7 @@ Phase 1 — User requirements (no environment probing yet)
   -> validate requirements.json
 
 Phase 2 — Environment probing and planning
+  -> read ~/.entity-env-build/site-notes/<hostname>.md if it exists
   -> locate/read dependency checkpoint JSON (if any)
   -> compare checkpoint against requirements.json
   -> search local dependency candidates
@@ -82,12 +84,14 @@ Phase 2 — Environment probing and planning
   -> user confirmation gate for ambiguous choices
   -> generate source-build scripts when needed
   -> write entity-deps.local.json
-  -> compatibility check
+  -> compatibility check (via isolated sub-agent — see §2i)
   -> generate env.sh
 
 Phase 3 — Entity build
   -> generate entity-build.sh from requirements.json + env.sh
-  -> execute entity-build.sh
+  -> execute entity-build.sh (via scheduler on clusters)
+  -> update ~/.entity-env-build/site-notes/<hostname>.md with build result
+  -> record build result in requirements.json
 ```
 
 ### Phase 1: Collect User Requirements
@@ -109,17 +113,31 @@ $ENTITY_HOME/
 └── problems/<problem-name>/<build-name>/
 ```
 
+After confirming both paths, initialize session state:
+
+```bash
+python3 -c "
+from _json_io import init_session_state
+init_session_state(Path('$ENTITY_WORKDIR'))
+"
+```
+
+If `.entity-session.json` already exists from a previous incomplete session, offer to resume from the last phase. The file tracks `phase`, `completed_steps`, `build_attempts`, and artifact paths.
+
 Default artifact paths under `ENTITY_WORKDIR`:
 
 ```text
 $ENTITY_WORKDIR/requirements.json
 $ENTITY_WORKDIR/entity-deps.local.json
+$ENTITY_WORKDIR/.entity-session.json
 $ENTITY_WORKDIR/env.sh
 $ENTITY_WORKDIR/entity-build.sh
 $ENTITY_WORKDIR/build/
-$ENTITY_WORKDIR/logs/
+$ENTITY_WORKDIR/build-logs/
 $ENTITY_WORKDIR/generated/source-build-scripts/
 ```
+
+Also: `~/.entity-env-build/site-notes/<hostname>.md` — machine-specific knowledge, generated at runtime. Read before environment probing; update after builds and discovered issues.
 
 #### 1b. Build Choices
 
@@ -202,7 +220,7 @@ Defaults that don't need asking unless the user overrides:
 Validate before proceeding:
 
 ```bash
-python3 scripts/validate_requirements.py "$ENTITY_WORKDIR/requirements.json"
+python3 scripts/entity_checkpoint.py validate "$ENTITY_WORKDIR/requirements.json"
 ```
 
 If validation fails, fix the missing fields or inconsistencies and re-validate. Do not start environment probing until `status=pass`.
@@ -211,7 +229,25 @@ If validation fails, fix the missing fields or inconsistencies and re-validate. 
 
 Only now — after `requirements.json` is written and validated — begin probing the environment.
 
-#### 2a. Locate And Read Existing Checkpoint
+#### 2a. Read Site Notes
+
+Before probing, check for machine-specific knowledge:
+
+```
+~/.entity-env-build/site-notes/<hostname>.md
+```
+
+If the file exists, read it. Use its contents to:
+- Skip known-bad dependency combinations
+- Prefer known-good combinations
+- Warn the user about known issues before they cause failures
+- Reference past build history for the same pgen/backend combination
+
+If the file does not exist, note that this is the first build on this machine — all known issues will be discovered fresh. A new site-notes file will be created after the build (or when the first non-obvious issue is encountered).
+
+Update session state: `last_action = "Reading site notes for <hostname>"`
+
+#### 2b. Locate And Read Existing Checkpoint
 
 Default checkpoint filename: `entity-deps.local.json`
 
@@ -231,7 +267,7 @@ Classify checkpoint state:
 - `complete`: structurally complete for the current requirements;
 - `incompatible`: complete enough to evaluate but fails compatibility.
 
-#### 2b. Compare Checkpoint Against requirements.json
+#### 2c. Compare Checkpoint Against requirements.json
 
 Reuse old dependency content only if it satisfies `requirements.json`.
 
@@ -244,7 +280,7 @@ Examples:
 
 Record this comparison under `status.satisfies_requirements_json` and `status.reuse_notes`.
 
-#### 2c. Search Dependency Candidates
+#### 2d. Search Dependency Candidates
 
 Search according to `requirements.json`.
 
@@ -265,26 +301,26 @@ For each candidate, record following the dependency entry shape in `references/j
 
 Do not treat a binary alone as sufficient. For CMake-based dependencies, prefer candidates with a valid `*Config.cmake`.
 
-#### 2d. Construct Checkpoint JSON
+#### 2e. Construct Checkpoint JSON
 
 Construct `entity-deps.local.json` from the requirements and dependency selections:
 
 ```bash
-python3 scripts/write_checkpoint.py "$ENTITY_WORKDIR/requirements.json" \
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
   --output "$ENTITY_WORKDIR/entity-deps.local.json"
 ```
 
 To merge with an existing checkpoint:
 
 ```bash
-python3 scripts/write_checkpoint.py "$ENTITY_WORKDIR/requirements.json" \
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
   --merge "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/entity-deps.local.json"
 ```
 
 See `references/json-contracts.md` for the full checkpoint schema. Write atomically: temporary file first, then replace the target JSON.
 
-#### 2e. Plan Selected Dependencies
+#### 2f. Plan Selected Dependencies
 
 Choose a dependency set that satisfies `requirements.json` with the least conflict.
 
@@ -303,7 +339,7 @@ Selection rules:
 
 Record rejected candidates and reasons.
 
-#### 2f. User Confirmation Gate
+#### 2g. User Confirmation Gate
 
 Confirm when:
 
@@ -338,29 +374,52 @@ Write every decision to JSON:
 
 If later probes invalidate a confirmed decision, mark it stale and re-enter this gate.
 
-#### 2g. Generate Source-Build Scripts When Needed
+#### 2h. Generate Source-Build Scripts When Needed
 
 Only do this after local/system reuse fails and the user has approved source builds. Use:
 
 ```bash
-python scripts/generate_dependency_build_scripts.py "$ENTITY_WORKDIR/requirements.json" \
+python scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
 ```
 
 Generated dependency scripts live under `$ENTITY_WORKDIR/generated/source-build-scripts/` and must not write into `ENTITY_CHECKOUT`. Review the generated script options against `requirements.json`, then execute only the missing dependency builds. After execution, update selected dependency entries with prefixes, CMake config paths, compiler signatures, and validation evidence.
 
-#### 2h. Compatibility Check
+#### 2i. Compatibility Check (Isolated Sub-Agent)
 
-Run compatibility after dependency JSON is written, and before `env.sh` generation.
+**Critical:** LAUNCH A SUB-AGENT for compatibility verification. The sub-agent has a clean context — it has NOT participated in environment probing and has no stake in the dependency choices made so far.
 
-For the detailed checklist, read `references/compatibility-check.md`.
+**Skip sub-agent only when ALL of the following are true** (run `scripts/entity_compat.py` directly):
+- `checkpoint.status.checkpoint == "complete"`
+- `checkpoint.status.satisfies_requirements_json == true`
+- `environment.backend == "cpu"`
+- `environment.mpi == false`
+- `environment.output == false` (only Kokkos + compiler needed)
 
-```bash
-python3 scripts/check_compatibility.py "$ENTITY_WORKDIR/requirements.json" \
-  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
-```
+Otherwise, launch the sub-agent with:
 
-Only `status=pass` allows `env.sh` generation. If compatibility fails, fix issues and re-run.
+Pass to the sub-agent:
+- Path to `requirements.json`
+- Path to `entity-deps.local.json`
+- Hostname (for site-notes lookup)
+- Instruction: "Verify these two JSON files satisfy each other. Read both files from scratch. Do NOT trust any prior conclusions. Run `python3 scripts/entity_compat.py <req.json> --checkpoint <deps.json> --no-update-json`. For each FAIL/WARN check, independently verify by reading the JSON and checking file paths on disk. Return a structured verdict."
+
+The sub-agent MUST:
+1. Run: `python3 scripts/entity_compat.py <req.json> --checkpoint <deps.json> --no-update-json`
+2. For each FAIL/WARN check, independently verify the evidence on disk
+3. Return a structured verdict:
+   - `pass`: all checks pass, ready for env.sh generation
+   - `partial`: only source-build scripts not yet executed are blocking
+   - `fail`: specific items to fix (with remediation from check output)
+
+After the sub-agent returns:
+- **If pass**: main agent runs `entity_compat.py` without `--no-update-json` to write result to checkpoint JSON; save the sub-agent's full report to `~/.entity-env-build/compat/<run_id>.json`
+- **If partial/fail**: main agent fixes issues, then **RE-LAUNCH a fresh sub-agent** (do not reuse the same sub-agent conversation)
+- **New issues discovered**: write to `~/.entity-env-build/site-notes/<hostname>.md` Known Issues
+
+**Sub-agent permissions**: `Bash(python3 scripts/entity_compat.py ...)` and `Read` only — no write access.
+
+Only `status=pass` allows `env.sh` generation.
 
 ### Phase 3: Entity Build
 
@@ -369,7 +428,7 @@ Only `status=pass` allows `env.sh` generation. If compatibility fails, fix issue
 After compatibility passes, generate a local environment loader. The generator refuses unless `compatibility.status=pass`.
 
 ```bash
-python3 scripts/generate_env_sh.py "$ENTITY_WORKDIR/entity-deps.local.json" \
+python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/env.sh"
 ```
 
@@ -385,10 +444,11 @@ After generation, minimally validate: source it and verify `cmake --version`, `"
 After `env.sh` is generated, create an Entity build script:
 
 ```bash
-python3 scripts/generate_entity_build_sh.py "$ENTITY_WORKDIR/requirements.json" \
+python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --env "$ENTITY_WORKDIR/env.sh" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
-  --output "$ENTITY_WORKDIR/entity-build.sh"
+  --output "$ENTITY_WORKDIR/entity-build.sh" \
+  --run-id "$RUN_ID"
 ```
 
 `--checkpoint` enables gate validation: the generator verifies compatibility is `pass` and env.sh matches the checkpoint. Omit `--checkpoint` only for debugging.
@@ -461,12 +521,34 @@ Entity build may start only when all are true:
 
 Entity build phase must start by executing `entity-build.sh`. Do not reconstruct state from chat history or transient shell variables.
 
+#### 3d. Update Site Notes
+
+After the build completes (success or failure), update `~/.entity-env-build/site-notes/<hostname>.md`:
+
+**On success:**
+- Append a row to the Build History table
+- If the dependency combination is new (not already in Known-good Combinations), add it
+- Update `last_updated` at the top
+
+**On failure with a newly discovered issue:**
+- Add the issue to Known Issues with: symptom, trigger, fix
+- Update `last_updated`
+
+**When creating site-notes for the first time on this machine:**
+- Use `references/site-notes-template.md` as the starting template
+- Fill in Machine Profile with what was learned during environment probing
+- Add all discovered issues encountered during this session
+
+The site-notes format is Markdown with structured sections. Keep entries concise — each issue should be one bullet group with Symptom/Trigger/Fix.
+
 ## Output Contract
 
 When this skill runs, report:
 
 - current requirements;
 - `requirements.json` path and completeness;
+- session state (`.entity-session.json`) — phase, completed steps, resumption if applicable;
+- site notes file path and whether it was found/created/updated;
 - checkpoint path and state;
 - whether old JSON was reused, repaired, or rejected;
 - selected dependency set;
@@ -474,4 +556,5 @@ When this skill runs, report:
 - compatibility result;
 - generated `env.sh` path;
 - generated `entity-build.sh` path and execution result;
+- build history updated in site-notes;
 - handoff readiness for Entity build.

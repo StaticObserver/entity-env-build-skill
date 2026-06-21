@@ -18,12 +18,12 @@ Official reference: https://entity-toolkit.github.io/wiki/content/1-getting-star
 
 ## Script Generator Role
 
-Use `scripts/generate_dependency_build_scripts.py` to generate local dependency build scripts adapted to this skill's layout.
+Use `scripts/entity_generate.py deps` to generate local dependency build scripts adapted to this skill's layout.
 
 Expected interface:
 
 ```bash
-python scripts/generate_dependency_build_scripts.py requirements.json \
+python3 scripts/entity_generate.py deps requirements.json \
   --deps kokkos,hdf5,adios2 \
   --checkpoint entity-deps.local.json
 ```
@@ -40,7 +40,7 @@ Current generator scope:
 
 - `kokkos`, `hdf5`, and `adios2` source-build scripts are generated directly.
 - `mpi` emits a deliberate stop script until a reviewed OpenMPI/UCX policy is added.
-- every script writes configure/build/install logs under `$ENTITY_WORKDIR/logs`.
+- every script writes configure/build/install logs under `$ENTITY_WORKDIR/build-logs`.
 - Kokkos and ADIOS2 scripts include the official baseline switches such as `CMAKE_CXX_EXTENSIONS=OFF`, position-independent code, disabled ADIOS2 Python/Fortran/ZeroMQ, disabled ADIOS2 tests, and disabled ADIOS2 examples.
 - exact Kokkos/ADIOS2/HDF5 source tags can be pinned through `requirements.environment.dependency_versions`.
 - for the `legacy` profile, `requirements.environment.dependency_versions.kokkos` must pin an exact Kokkos 4.x tag before generating a Kokkos source-build script.
@@ -63,7 +63,7 @@ ADIOS2 only if output=true
 Every generated script should:
 
 - use `set -euo pipefail`;
-- write logs under `$ENTITY_WORKDIR/logs`;
+- write logs under `$ENTITY_WORKDIR/build-logs`;
 - install under a prefix recorded in `entity-deps.local.json`;
 - use compilers from `entity-deps.local.json.selected.compiler`;
 - preserve MPI on/off and backend choices from `requirements.json`;
@@ -83,7 +83,7 @@ After generating scripts, update `entity-deps.local.json.build_scripts`:
       "kokkos": {
         "path": "",
         "status": "generated",
-        "source": "entity-env-build/scripts/generate_dependency_build_scripts.py",
+        "source": "entity-env-build/scripts/entity_generate.py deps",
         "based_on": "Entity dependencies.py/wiki dependency generator"
       }
     }
