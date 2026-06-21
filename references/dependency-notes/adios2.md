@@ -46,15 +46,20 @@ with Kokkos first (so ADIOS2 finds KokkosConfig.cmake before falling back to non
 
 ## Known Issues
 
-### CUDA Stub Library on Login Nodes
-- Symptom: linker error `cannot find -lcuda` or `libcuda.so not found`
-- Trigger: Building on login node without GPU drivers (no libcuda.so.1)
-- Fix: Add CUDA stubs path to linker flags:
+### CUDA GPU Dynamic Libraries Required
+- Symptom: linker error `cannot find -l cuda`, `libcuda.so not found`, or `libcudart.so` missing
+- Trigger: ADIOS2 2.11.x with Kokkos CUDA backend links against CUDA runtime libraries
+- Fix: Add BOTH stubs and real lib paths to linker flags. Stubs first (login nodes prefer them for non-GPU symbols), then real lib path (GPU nodes need libcuda.so and libcudart.so):
   ```bash
-  export LDFLAGS="-L<cuda_prefix>/targets/x86_64-linux/lib/stubs"
+  STUBS="<cuda_prefix>/targets/x86_64-linux/lib/stubs"
+  CUDA_LIB="<cuda_prefix>/targets/x86_64-linux/lib"
+  export LDFLAGS="-L$STUBS -L$CUDA_LIB ${LDFLAGS:-}"
+  export CMAKE_EXE_LINKER_FLAGS="-L$STUBS -L$CUDA_LIB ${CMAKE_EXE_LINKER_FLAGS:-}"
+  export CMAKE_SHARED_LINKER_FLAGS="-L$STUBS -L$CUDA_LIB ${CMAKE_SHARED_LINKER_FLAGS:-}"
   ```
-  Or create symlink: `ln -s libcuda.so libcuda.so.1` in stubs directory.
-  GPU compute nodes don't need this.
+  The stubs provide enough symbols for ADIOS2 to link on login nodes;
+  the real lib path is needed for GPU nodes at link and runtime.
+  The generated build script adds both paths automatically.
 
 ### enable_language(CUDA) Without Required Variables
 - Symptom: CMake error "No CMAKE_CUDA_COMPILER could be found"

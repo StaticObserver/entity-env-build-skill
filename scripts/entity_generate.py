@@ -294,13 +294,16 @@ def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Pat
             # Map Kokkos arch name to CUDA compute capability
             arch_num = _kokkos_arch_to_cuda(cuda_arch)
             stubs_path = f"{cuda_prefix}/targets/x86_64-linux/lib/stubs"
+            cuda_lib_path = f"{cuda_prefix}/targets/x86_64-linux/lib"
             cuda_extra = f"""
 # CUDA + Kokkos: set CUDA compiler and architecture for enable_language(CUDA)
 export CMAKE_CUDA_COMPILER={q(cuda_prefix + '/bin/nvcc')}
 export CMAKE_CUDA_ARCHITECTURES={q(arch_num)}
-export LDFLAGS="-L{stubs_path} ${{LDFLAGS:-}}"
-export CMAKE_EXE_LINKER_FLAGS="-L{stubs_path} ${{CMAKE_EXE_LINKER_FLAGS:-}}"
-export CMAKE_SHARED_LINKER_FLAGS="-L{stubs_path} ${{CMAKE_SHARED_LINKER_FLAGS:-}}"
+# Both stubs (login nodes) and real libs (GPU nodes) — order: stubs first
+# so the linker prefers stubs for symbols that don't need real GPU
+export LDFLAGS="-L{stubs_path} -L{cuda_lib_path} ${{LDFLAGS:-}}"
+export CMAKE_EXE_LINKER_FLAGS="-L{stubs_path} -L{cuda_lib_path} ${{CMAKE_EXE_LINKER_FLAGS:-}}"
+export CMAKE_SHARED_LINKER_FLAGS="-L{stubs_path} -L{cuda_lib_path} ${{CMAKE_SHARED_LINKER_FLAGS:-}}"
 """
     opts = [
         '-DCMAKE_INSTALL_PREFIX="$PREFIX"',
