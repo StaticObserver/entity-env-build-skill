@@ -37,6 +37,8 @@ Only `status=pass` may continue to `env.sh` generation.
 
 ## 1. Request And Checkpoint Consistency
 
+> **Implementation status: Partial** — `check_compatibility.py` checks `ENTITY_CHECKOUT`/`ENTITY_WORKDIR` mismatch and `requirements.path` existence. Schema version and detailed field-by-field match are not yet automated.
+
 Check:
 
 - `entity-deps.local.json.requirements` points to or embeds the current `requirements.json`.
@@ -48,6 +50,8 @@ Check:
 Fail if the checkpoint was produced for a different Entity checkout, workdir, backend, MPI mode, output mode, or dependency profile.
 
 ## 2. Entity Version Profile
+
+> **Implementation status: Implemented** — `check_compatibility.py` validates profile detection, C++ standard, Kokkos/ADIOS2 version-family match, and ADIOS2 Kokkos support mode.
 
 Derive the expected profile from `requirements.entity.version_bucket` unless `requirements.entity.dependency_profile` explicitly overrides it.
 
@@ -63,6 +67,8 @@ Fail on a version-family mismatch unless the user explicitly confirmed an overri
 
 ## 3. Toolchain Consistency
 
+> **Implementation status: Partial** — `check_compatibility.py` validates that `compiler.cxx`/`cc` paths exist and are executable. Signature consistency across dependencies is not yet compared automatically.
+
 Check:
 
 - selected `cmake`, `compiler.cc`, and `compiler.cxx` exist and are executable.
@@ -74,6 +80,8 @@ Check:
 Evidence should include executable paths, version output, and compiler signature strings.
 
 ## 4. Backend Check
+
+> **Implementation status: Partial** — CUDA nvcc_wrapper and ADIOS2 flag conflicts are checked. HIP toolkit prefix existence is checked. CPU backend checks and GPU architecture validation are not automated.
 
 For `backend=cpu`:
 
@@ -98,6 +106,8 @@ For `backend=hip`:
 
 ## 5. MPI Check
 
+> **Implementation status: Partial** — MPI selection presence is checked but MPI wrapper output, compiler-family compatibility, and ADIOS2/HDF5 serial/MPI consistency are not validated.
+
 When `requirements.environment.mpi=false`:
 
 - Entity build will use `mpi=OFF`.
@@ -114,6 +124,8 @@ When `requirements.environment.mpi=true`:
 - `gpu_aware_mpi=true` has evidence or an explicit risk acceptance.
 
 ## 6. Dependency Presence And Discovery
+
+> **Implementation status: Implemented** — `check_compatibility.py` validates that `prefix`, `cmake_config`, and `bin` paths exist on disk. Structural completeness (non-empty fields) is checked separately.
 
 For each required dependency, check both files and CMake discovery.
 
@@ -141,6 +153,8 @@ At minimum, verify that every recorded `cmake_config` path exists and its prefix
 
 ## 7. ADIOS2, HDF5, And Kokkos Mode Compatibility
 
+> **Implementation status: Partial** — ADIOS2 Kokkos support mode vs. profile is checked. ADIOS2_USE_Kokkos + CUDA conflict is detected. Serial/MPI mode consistency is not yet automated.
+
 Check:
 
 - ADIOS2/HDF5 serial-vs-MPI mode matches `requirements.environment.mpi`.
@@ -152,6 +166,8 @@ Check:
 
 ## 8. Runtime Loader Paths
 
+> **Implementation status: Not yet implemented** — Path entries recorded in `paths.*` are not yet validated for existence.
+
 Check:
 
 - every `PATH`, `CMAKE_PREFIX_PATH`, `LD_LIBRARY_PATH`, and `DYLD_LIBRARY_PATH` entry recorded in checkpoint exists unless it is intentionally absent on the current OS.
@@ -161,6 +177,8 @@ Check:
 On macOS, check `DYLD_LIBRARY_PATH`; on Linux, check `LD_LIBRARY_PATH`.
 
 ## 9. Source-Build Script Readiness
+
+> **Implementation status: Partial** — Source-build scripts with `status=generated` and no install evidence are flagged. Individual script option validation is not automated.
 
 When selected dependencies have provider `source-build`:
 
@@ -173,6 +191,8 @@ When selected dependencies have provider `source-build`:
 Do not mark compatibility `pass` for a dependency that only has a generated script but no completed install evidence.
 
 ## 10. Entity Build Readiness
+
+> **Implementation status: Not yet implemented** — Performed implicitly by `generate_entity_build_sh.py` (pgen requirement, CMake option derivation). Not a standalone check in `check_compatibility.py`.
 
 Check:
 

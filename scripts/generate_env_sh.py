@@ -164,6 +164,16 @@ def generate_env(data: dict[str, Any], json_path: Path) -> str:
         lines.append(shell_export("NVCC_WRAPPER_DEFAULT_COMPILER", host_cxx))
     if mpicxx:
         lines.append(shell_export("MPICXX", mpicxx))
+
+    # Extra environment variables (ROCM_PATH, OMPI_CC, HSA_OVERRIDE_GFX_VERSION, etc.)
+    extra_env = paths.get("extra_env", {}) if isinstance(paths, dict) else {}
+    if isinstance(extra_env, dict) and extra_env:
+        lines.append("")
+        lines.append("# Site-specific environment overrides from entity-deps.local.json")
+        for var, val in extra_env.items():
+            if val:
+                lines.append(shell_export(str(var), str(val)))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -213,6 +223,7 @@ def main() -> None:
                 "path": str(args.output.resolve()),
                 "status": "generated",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_from_checkpoint": str(args.json_path.resolve()),
                 "validation": {"bash_syntax": "not_run", "commands": []},
             }
         )

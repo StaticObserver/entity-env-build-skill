@@ -143,7 +143,8 @@ Required shape:
     "PATH": [],
     "CMAKE_PREFIX_PATH": [],
     "LD_LIBRARY_PATH": [],
-    "DYLD_LIBRARY_PATH": []
+    "DYLD_LIBRARY_PATH": [],
+    "extra_env": {}
   },
   "build_scripts": {},
   "compatibility": {
@@ -187,7 +188,26 @@ Selected dependency entries should use this shape when possible:
 }
 ```
 
-CUDA-specific selected fields:
+## Extra Environment Variables
+
+Site-specific environment variables that `generate_env_sh.py` should write into `env.sh` can be recorded under `paths.extra_env`:
+
+```json
+{
+  "paths": {
+    "extra_env": {
+      "ROCM_PATH": "/opt/rocm",
+      "OMPI_CC": "hipcc",
+      "OMPI_CXX": "hipcc",
+      "HSA_OVERRIDE_GFX_VERSION": "9.0.6"
+    }
+  }
+}
+```
+
+Each key-value pair becomes `export KEY=VALUE` in the generated `env.sh`. Use this for system-specific variables that the generic path-derivation logic cannot know about (DTK/ROCm paths, MPI wrapper overrides, GPU runtime environment settings).
+
+## CUDA-specific selected fields
 
 ```json
 {

@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Check whether entity-deps.local.json satisfies requirements.json."""
+"""Check whether entity-deps.local.json satisfies requirements.json.
+
+Implements checks described in references/compatibility-check.md.
+Sections referenced in comments map to that document.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-PROFILES = {
-    "legacy": {"cxx_standard": "17", "kokkos": "4.", "adios2": "2.10.", "adios2_uses_kokkos": False},
-    "modern": {"cxx_standard": "20", "kokkos": "5.", "adios2": "2.11.", "adios2_uses_kokkos": True},
-}
+from _version_profile import profile_for
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -27,31 +28,157 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as f:
         f.write(text)
         tmp = Path(f.name)
     tmp.replace(path)
 
 
-def profile_for(req: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    entity = req.get("entity", {})
-    if not isinstance(entity, dict):
-        raise ValueError("requirements.entity is missing")
-    profile = str(entity.get("dependency_profile") or "").lower()
-    if profile in PROFILES:
-        return profile, PROFILES[profile]
-    version = str(entity.get("version_bucket") or entity.get("version") or "").lower()
-    if not version:
-        raise ValueError("requirements.entity.version_bucket or dependency_profile is required")
-    digits = []
-    for part in version.removeprefix("v").replace("x", "0").split("."):
-        if part.isdigit():
-            digits.append(int(part))
-        else:
-            break
-    if len(digits) >= 2 and (digits[0], digits[1]) <= (1, 4):
-        return "legacy", PROFILES["legacy"]
-    return "modern", PROFILES["modern"]
+def add(
+    checks: list[dict[str, Any]],
+    check_id: str,
+    status: str,
+    summary: str,
+    evidence: dict[str, Any] | None = None,
+    remediation: str = "",
+) -> None:
+    checks.append(
+        {
+            "id": check_id,
+            "status": status,
+            "summary": summary,
+            "evidence": evidence or {},
+            "remediation": remediation,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Path / file-system validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _real_path(value: Any) -> Path | None:
+    """Return a Path if *value* is a non-empty string, otherwise None."""
+    if value and isinstance(value, str):
+        return Path(value)
+    return None
+
+
+def validate_dependency_paths(
+    checks: list[dict[str, Any]],
+    issues: list[str],
+    dep: str,
+    entry: dict[str, Any],
+) -> bool:
+    """Verify that recorded prefix / cmake_config / bin paths exist on disk.
+
+    Returns True when at least one usable path is confirmed.
+    """
+    prefix = _real_path(entry.get("prefix"))
+    cmake_config = _real_path(entry.get("cmake_config"))
+    bin_path = _real_path(entry.get("bin"))
+
+    prefix_ok = prefix is not None and prefix.is_dir()
+    config_ok = cmake_config is not None and cmake_config.is_file()
+    bin_ok = bin_path is not None and bin_path.exists()
+
+    missing: list[str] = []
+
+    if prefix is not None and not prefix_ok:
+        missing.append(f"prefix: {prefix}")
+    if cmake_config is not None and not config_ok:
+        missing.append(f"cmake_config: {cmake_config}")
+    if bin_path is not None and not bin_ok:
+        missing.append(f"bin: {bin_path}")
+
+    if missing:
+        add(
+            checks,
+            f"dependency.{dep}.paths",
+            "fail",
+            f"{dep}: recorded paths do not exist on disk",
+            {"missing_paths": missing},
+            remediation=f"Verify {dep} is installed at the recorded paths, "
+            f"or update entity-deps.local.json selected.{dep} with correct paths.",
+        )
+        issues.append(f"{dep}: recorded paths do not exist on disk -- {', '.join(missing)}")
+        return False
+
+    # At least one path exists
+    usable = prefix_ok or config_ok or bin_ok
+    if not usable:
+        add(
+            checks,
+            f"dependency.{dep}.paths",
+            "fail",
+            f"{dep}: no usable paths recorded (prefix/cmake_config/bin all empty)",
+            {},
+            remediation=f"Add prefix, cmake_config, or bin to selected.{dep} in entity-deps.local.json.",
+        )
+        issues.append(f"{dep}: no usable paths recorded")
+        return False
+
+    add(
+        checks,
+        f"dependency.{dep}.paths",
+        "pass",
+        f"{dep}: recorded paths exist on disk",
+        {"prefix_ok": prefix_ok, "cmake_config_ok": config_ok, "bin_ok": bin_ok},
+    )
+    return True
+
+
+def validate_compiler_executable(
+    checks: list[dict[str, Any]],
+    issues: list[str],
+    compiler: dict[str, Any],
+) -> bool:
+    """Check that compiler.cxx (and .cc if present) exist and are executable."""
+    ok = True
+    for key, label in (("cxx", "CXX"), ("cc", "CC")):
+        path_str = str(compiler.get(key) or "")
+        if not path_str:
+            continue
+        p = Path(path_str)
+        if not p.exists():
+            add(
+                checks,
+                f"compiler.{key}.exists",
+                "fail",
+                f"{label} compiler path does not exist: {p}",
+                {"path": path_str},
+                remediation=f"Install or locate the correct {label} compiler and update selected.compiler.{key}.",
+            )
+            issues.append(f"{label} compiler path does not exist: {p}")
+            ok = False
+        elif not os.access(str(p), os.X_OK):
+            add(
+                checks,
+                f"compiler.{key}.executable",
+                "fail",
+                f"{label} path is not executable: {p}",
+                {"path": path_str},
+                remediation=f"Ensure {p} has execute permission.",
+            )
+            issues.append(f"{label} is not executable: {p}")
+            ok = False
+    if ok and compiler:
+        add(
+            checks,
+            "compiler.executable",
+            "pass",
+            "Compiler paths exist and are executable",
+            {},
+        )
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers (unchanged logic from original)
+# ---------------------------------------------------------------------------
 
 
 def selected_version(checkpoint: dict[str, Any], dep: str) -> str:
@@ -85,14 +212,6 @@ def adios2_uses_kokkos(checkpoint: dict[str, Any]) -> bool | None:
     return None
 
 
-def add(checks: list[dict[str, Any]], check_id: str, status: str, summary: str, evidence: dict[str, Any] | None = None) -> None:
-    checks.append({"id": check_id, "status": status, "summary": summary, "evidence": evidence or {}, "remediation": ""})
-
-
-def path_exists(value: Any) -> bool:
-    return bool(value) and Path(str(value)).exists()
-
-
 def selected_entry(checkpoint: dict[str, Any], dep: str) -> dict[str, Any]:
     selected = checkpoint.get("selected", {})
     if isinstance(selected, dict) and isinstance(selected.get(dep), dict):
@@ -101,90 +220,312 @@ def selected_entry(checkpoint: dict[str, Any], dep: str) -> dict[str, Any]:
 
 
 def has_installed_dependency(checkpoint: dict[str, Any], dep: str) -> bool:
+    """Return True when *dep* has a usable entry with existing paths.
+
+    This is a structural check; path-existence validation is done
+    separately by validate_dependency_paths() during the dependency check
+    pass so each failure gets its own check item with remediation.
+    """
     entry = selected_entry(checkpoint, dep)
     if not entry:
         return False
-    if entry.get("provider") == "source-build" and not entry.get("validation", {}).get("installed"):
+    if entry.get("provider") == "source-build" and not entry.get("validation", {}).get(
+        "installed"
+    ):
         return False
     return bool(entry.get("prefix") or entry.get("cmake_config") or entry.get("bin"))
 
 
-def run_checks(req: dict[str, Any], checkpoint: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[str]]:
+# ---------------------------------------------------------------------------
+# Main check runner
+# ---------------------------------------------------------------------------
+
+
+def run_checks(
+    req: dict[str, Any], checkpoint: dict[str, Any]
+) -> tuple[str, list[dict[str, Any]], list[str]]:
     checks: list[dict[str, Any]] = []
     issues: list[str] = []
 
+    # -- Section 1: Request / checkpoint consistency ------------------------
+    # (ref: compatibility-check.md section 1)
+    req_path = (
+        checkpoint.get("requirements", {}).get("path", "")
+        if isinstance(checkpoint.get("requirements"), dict)
+        else ""
+    )
+    if req_path:
+        req_path = str(req_path)
+        if not Path(req_path).exists():
+            add(
+                checks,
+                "consistency.requirements_path",
+                "warn",
+                f"Checkpoint references requirements.json path that does not exist: {req_path}",
+                {"requirements_path": req_path},
+                remediation="Update entity-deps.local.json.requirements.path.",
+            )
+
+    cp_entity = checkpoint.get("entity", {}) if isinstance(checkpoint.get("entity"), dict) else {}
+    req_entity = req.get("entity", {}) if isinstance(req.get("entity"), dict) else {}
+    cp_checkout = str(cp_entity.get("checkout_root") or "")
+    req_checkout = str(req_entity.get("checkout_root") or "")
+    if cp_checkout and req_checkout and cp_checkout != req_checkout:
+        add(
+            checks,
+            "consistency.checkout_root",
+            "fail",
+            "ENTITY_CHECKOUT mismatch between requirements and checkpoint",
+            {"requirements": req_checkout, "checkpoint": cp_checkout},
+            remediation="Regenerate entity-deps.local.json for the current ENTITY_CHECKOUT.",
+        )
+        issues.append("ENTITY_CHECKOUT differs between requirements.json and checkpoint")
+
+    cp_workdir = str(cp_entity.get("workdir") or "")
+    req_workdir = str(req_entity.get("workdir") or "")
+    if cp_workdir and req_workdir and cp_workdir != req_workdir:
+        add(
+            checks,
+            "consistency.workdir",
+            "fail",
+            "ENTITY_WORKDIR mismatch between requirements and checkpoint",
+            {"requirements": req_workdir, "checkpoint": cp_workdir},
+            remediation="Regenerate entity-deps.local.json for the current ENTITY_WORKDIR.",
+        )
+        issues.append("ENTITY_WORKDIR differs between requirements.json and checkpoint")
+
+    # -- Section 2: Entity version profile ----------------------------------
+    # (ref: compatibility-check.md section 2)
     try:
         profile_name, profile = profile_for(req)
-        add(checks, "profile.detect", "pass", f"Using {profile_name} profile", {"profile": profile_name})
+        add(
+            checks,
+            "profile.detect",
+            "pass",
+            f"Using {profile_name} profile",
+            {"profile": profile_name},
+        )
     except ValueError as exc:
         add(checks, "profile.detect", "fail", str(exc))
         issues.append(str(exc))
         return "fail", checks, issues
 
     compile_cfg = req.get("compile", {})
-    cxx_standard = str(compile_cfg.get("cxx_standard") or profile["cxx_standard"]) if isinstance(compile_cfg, dict) else str(profile["cxx_standard"])
+    cxx_standard = (
+        str(compile_cfg.get("cxx_standard") or profile["cxx_standard"])
+        if isinstance(compile_cfg, dict)
+        else str(profile["cxx_standard"])
+    )
     if cxx_standard == profile["cxx_standard"]:
-        add(checks, "profile.cxx_standard", "pass", "C++ standard matches Entity profile", {"cxx_standard": cxx_standard})
+        add(
+            checks,
+            "profile.cxx_standard",
+            "pass",
+            "C++ standard matches Entity profile",
+            {"cxx_standard": cxx_standard},
+        )
     else:
-        add(checks, "profile.cxx_standard", "fail", "C++ standard does not match Entity profile", {"expected": profile["cxx_standard"], "actual": cxx_standard})
+        add(
+            checks,
+            "profile.cxx_standard",
+            "fail",
+            "C++ standard does not match Entity profile",
+            {"expected": profile["cxx_standard"], "actual": cxx_standard},
+            remediation=f"Set requirements.compile.cxx_standard to {profile['cxx_standard']} "
+            f"or accept the override in decisions.",
+        )
         issues.append("C++ standard does not match Entity profile")
 
     for dep, prefix in (("kokkos", profile["kokkos"]), ("adios2", profile["adios2"])):
         version = selected_version(checkpoint, dep)
         if version and version.startswith(prefix):
-            add(checks, f"profile.{dep}_version", "pass", f"{dep} version matches profile", {"version": version})
+            add(
+                checks,
+                f"profile.{dep}_version",
+                "pass",
+                f"{dep} version matches profile",
+                {"version": version},
+            )
         else:
-            add(checks, f"profile.{dep}_version", "fail", f"{dep} version does not match profile", {"expected_prefix": prefix, "actual": version})
+            add(
+                checks,
+                f"profile.{dep}_version",
+                "fail",
+                f"{dep} version does not match profile",
+                {"expected_prefix": prefix, "actual": version},
+                remediation=f"Select a {dep} version from the {prefix}x family "
+                f"that matches the {profile_name} profile.",
+            )
             issues.append(f"{dep} version does not match profile")
 
     uses_kokkos = adios2_uses_kokkos(checkpoint)
     if uses_kokkos is profile["adios2_uses_kokkos"]:
-        add(checks, "profile.adios2_kokkos", "pass", "ADIOS2 Kokkos mode matches profile", {"adios2_uses_kokkos": uses_kokkos})
+        add(
+            checks,
+            "profile.adios2_kokkos",
+            "pass",
+            "ADIOS2 Kokkos mode matches profile",
+            {"adios2_uses_kokkos": uses_kokkos},
+        )
     else:
-        add(checks, "profile.adios2_kokkos", "fail", "ADIOS2 Kokkos mode does not match profile", {"expected": profile["adios2_uses_kokkos"], "actual": uses_kokkos})
+        add(
+            checks,
+            "profile.adios2_kokkos",
+            "fail",
+            "ADIOS2 Kokkos mode does not match profile",
+            {"expected": profile["adios2_uses_kokkos"], "actual": uses_kokkos},
+            remediation=f"Set ADIOS2 compile_config.adios2_uses_kokkos to "
+            f"{str(profile['adios2_uses_kokkos']).lower()} for the {profile_name} profile.",
+        )
         issues.append("ADIOS2 Kokkos mode does not match profile")
 
+    # -- Section 3: Toolchain consistency -----------------------------------
+    # (ref: compatibility-check.md section 3)
     selected = checkpoint.get("selected", {})
     compiler = selected.get("compiler", {}) if isinstance(selected, dict) else {}
     compiler_ok = isinstance(compiler, dict) and bool(compiler.get("cxx"))
-    add(checks, "compiler.selected", "pass" if compiler_ok else "fail", "C++ compiler is selected", {"compiler": compiler})
+    add(
+        checks,
+        "compiler.selected",
+        "pass" if compiler_ok else "fail",
+        "C++ compiler is selected",
+        {"compiler": compiler},
+        remediation="Add selected.compiler to entity-deps.local.json with cc and cxx fields.",
+    )
     if not compiler_ok:
         issues.append("C++ compiler is not selected")
+    else:
+        validate_compiler_executable(checks, issues, compiler)
 
+    # -- Section 4: Backend check -------------------------------------------
+    # (ref: compatibility-check.md section 4)
     env = req.get("environment", {})
-    backend = str(env.get("backend") or "cpu").lower() if isinstance(env, dict) else "cpu"
+    backend = (
+        str(env.get("backend") or "cpu").lower() if isinstance(env, dict) else "cpu"
+    )
     if backend == "cuda":
-        cxx = str(compiler.get("cxx") or selected_entry(checkpoint, "kokkos").get("nvcc_wrapper") or "")
+        cxx = str(
+            compiler.get("cxx")
+            or selected_entry(checkpoint, "kokkos").get("nvcc_wrapper")
+            or ""
+        )
         ok = "nvcc_wrapper" in Path(cxx).name
-        add(checks, "backend.cuda.compiler", "pass" if ok else "fail", "CUDA backend uses Kokkos nvcc_wrapper", {"cxx": cxx})
+        add(
+            checks,
+            "backend.cuda.compiler",
+            "pass" if ok else "fail",
+            "CUDA backend uses Kokkos nvcc_wrapper",
+            {"cxx": cxx},
+            remediation="Set selected.compiler.cxx to the Kokkos nvcc_wrapper path.",
+        )
         if not ok:
             issues.append("CUDA backend requires Kokkos nvcc_wrapper as CXX")
-        adios2_script = checkpoint.get("build_scripts", {}).get("scripts", {}).get("adios2", {})
-        script_path = adios2_script.get("path") if isinstance(adios2_script, dict) else ""
+        adios2_script = (
+            checkpoint.get("build_scripts", {}).get("scripts", {}).get("adios2", {})
+        )
+        script_path = (
+            adios2_script.get("path") if isinstance(adios2_script, dict) else ""
+        )
         if script_path and Path(str(script_path)).exists():
             text = Path(str(script_path)).read_text(encoding="utf-8")
-            conflict = "ADIOS2_USE_Kokkos=ON" in text and "ADIOS2_USE_CUDA=ON" in text
-            add(checks, "backend.cuda.adios2_flags", "fail" if conflict else "pass", "ADIOS2 Kokkos/CUDA flags are not mutually enabled", {"script": script_path})
+            conflict = (
+                "ADIOS2_USE_Kokkos=ON" in text and "ADIOS2_USE_CUDA=ON" in text
+            )
+            add(
+                checks,
+                "backend.cuda.adios2_flags",
+                "fail" if conflict else "pass",
+                "ADIOS2 Kokkos/CUDA flags are not mutually enabled",
+                {"script": script_path},
+                remediation="Do not set ADIOS2_USE_Kokkos=ON and ADIOS2_USE_CUDA=ON together.",
+            )
             if conflict:
-                issues.append("ADIOS2_USE_Kokkos and ADIOS2_USE_CUDA cannot both be ON")
+                issues.append(
+                    "ADIOS2_USE_Kokkos and ADIOS2_USE_CUDA cannot both be ON"
+                )
+    elif backend == "hip":
+        gpu_toolkit = (
+            selected.get("gpu_toolkit", {})
+            if isinstance(selected, dict)
+            else {}
+        )
+        if isinstance(gpu_toolkit, dict) and gpu_toolkit.get("prefix"):
+            tk_prefix = str(gpu_toolkit["prefix"])
+            if not Path(tk_prefix).is_dir():
+                add(
+                    checks,
+                    "backend.hip.toolkit",
+                    "fail",
+                    f"HIP/ROCm toolkit prefix does not exist: {tk_prefix}",
+                    {"prefix": tk_prefix},
+                    remediation="Verify the GPU toolkit prefix in selected.gpu_toolkit.prefix.",
+                )
+                issues.append(f"GPU toolkit prefix not found: {tk_prefix}")
 
+    # -- Section 5-6: Dependency presence with path validation ---------------
+    # (ref: compatibility-check.md sections 5,6)
     required = ["kokkos"]
     if isinstance(env, dict) and env.get("output", True):
         required.extend(["hdf5", "adios2"])
     if isinstance(env, dict) and env.get("mpi"):
         required.append("mpi")
-    for dep in required:
-        ok = has_installed_dependency(checkpoint, dep)
-        add(checks, f"dependency.{dep}", "pass" if ok else "fail", f"{dep} has installed/discoverable evidence", selected_entry(checkpoint, dep))
-        if not ok:
-            issues.append(f"{dep} is missing installed/discoverable evidence")
 
+    for dep in required:
+        entry = selected_entry(checkpoint, dep)
+        if not entry:
+            add(
+                checks,
+                f"dependency.{dep}",
+                "fail",
+                f"{dep} is not selected",
+                {},
+                remediation=f"Add selected.{dep} to entity-deps.local.json.",
+            )
+            issues.append(f"{dep} is not selected")
+            continue
+        # Path existence validation (the core P0 fix):
+        validate_dependency_paths(checks, issues, dep, entry)
+        # Structural completeness:
+        if not has_installed_dependency(checkpoint, dep):
+            add(
+                checks,
+                f"dependency.{dep}.structural",
+                "fail",
+                f"{dep} has no installed/discoverable evidence",
+                entry,
+                remediation=f"Ensure selected.{dep} has prefix, cmake_config, or bin "
+                f"that points to a real installation.",
+            )
+            if dep not in [i for i in issues]:
+                issues.append(f"{dep} is missing installed/discoverable evidence")
+
+    # -- Section 7: ADIOS2 / HDF5 / Kokkos mode compatibility ---------------
+    # (ref: compatibility-check.md section 7)
+    # MPI consistency across ADIOS2 and HDF5 is checked implicitly above;
+    # per-package checks (ADIOS2_USE_Kokkos vs CUDA) are in Section 4.
+
+    # -- Section 9: Source-build script readiness ---------------------------
+    # (ref: compatibility-check.md section 9)
     source_scripts = checkpoint.get("build_scripts", {}).get("scripts", {})
     if isinstance(source_scripts, dict):
         for dep, script in source_scripts.items():
-            if isinstance(script, dict) and script.get("status") == "generated" and not has_installed_dependency(checkpoint, dep):
-                add(checks, f"source_build.{dep}", "fail", "Generated source-build script has not produced installed dependency evidence", script)
-                issues.append(f"{dep} source-build script has not produced installed dependency evidence")
+            if (
+                isinstance(script, dict)
+                and script.get("status") == "generated"
+                and not has_installed_dependency(checkpoint, dep)
+            ):
+                add(
+                    checks,
+                    f"source_build.{dep}",
+                    "fail",
+                    "Generated source-build script has not produced installed dependency evidence",
+                    script,
+                    remediation=f"Run the {dep} source-build script and record install evidence "
+                    f"in selected.{dep} before retrying compatibility.",
+                )
+                issues.append(
+                    f"{dep} source-build script has not produced installed dependency evidence"
+                )
 
     return ("pass" if not issues else "fail"), checks, issues
 

@@ -102,7 +102,7 @@ $ENTITY_HOME/
 └── problems/<problem-name>/<build-name>/
 ```
 
-Default artifact paths are:
+Default artifact paths:
 
 ```text
 $ENTITY_WORKDIR/requirements.json
@@ -114,60 +114,13 @@ $ENTITY_WORKDIR/logs/
 $ENTITY_WORKDIR/generated/source-build-scripts/
 ```
 
-Derive or ask for:
+Use `scripts/validate_requirements.py` to confirm completeness before proceeding:
 
-```json
-{
-  "schema_version": 1,
-  "generated_at": "",
-  "entity": {
-    "checkout_root": "",
-    "version_bucket": "",
-    "dependency_profile": "legacy|modern",
-    "workdir": ""
-  },
-  "environment": {
-    "backend": "cuda|hip|cpu|unspecified",
-    "mpi": true,
-    "gpu_aware_mpi": false,
-    "output": true,
-    "dependency_versions": {
-      "kokkos": "",
-      "adios2": "",
-      "hdf5": ""
-    },
-    "dependency_policy": "reuse-existing|allow-local-build|unspecified"
-  },
-  "compile": {
-    "cxx_standard": "17|20",
-    "pgen": "",
-    "pgens": "",
-    "precision": "single|double",
-    "deposit": "zigzag|esirkepov",
-    "shape_order": 1,
-    "debug": false,
-    "tests": false,
-    "build_intent": "smoke|production|debug|unspecified",
-    "build_dir": "",
-    "install": false,
-    "install_prefix": "",
-    "jobs": ""
-  },
-  "artifacts": {
-    "dependency_checkpoint_json": "",
-    "env_sh": "",
-    "entity_build_sh": "",
-    "logs_dir": "",
-    "generated_dir": ""
-  },
-  "decisions": {},
-  "status": {
-    "complete": false
-  }
-}
+```bash
+python3 scripts/validate_requirements.py "$ENTITY_WORKDIR/requirements.json"
 ```
 
-Defaults:
+Write `requirements.json` following the schema in `references/json-contracts.md`. Defaults:
 
 - `backend`: prefer GPU when a viable GPU compiler/toolkit is available; if not found, ask before falling back to CPU.
 - `mpi`: do not enable just because `mpicxx` exists. Ask unless the user request clearly implies MPI.
@@ -236,42 +189,34 @@ Conditional search:
 - `environment.mpi=true`: `mpicxx`, `mpirun`, MPI modules;
 - `environment.output=true`: `ADIOS2`, `HDF5`.
 
-For each candidate, record:
-
-```json
-{
-  "name": "",
-  "version": "",
-  "provider": "module|system|local-prefix|source-build|entity-dependencies|unknown",
-  "prefix": "",
-  "bin": "",
-  "include": "",
-  "lib": "",
-  "cmake_config": "",
-  "compiler_signature": "",
-  "mpi_signature": "",
-  "module_or_env": "",
-  "probe_evidence": []
-}
-```
+For each candidate, record following the dependency entry shape in `references/json-contracts.md`.
 
 Do not treat a binary alone as sufficient. For CMake-based dependencies, prefer candidates with a valid `*Config.cmake`.
 
-### 5. Plan Selected Dependencies
+### 5. Construct Checkpoint JSON
+
+Construct `entity-deps.local.json` from the requirements and dependency selections:
+
+```bash
+python3 scripts/write_checkpoint.py "$ENTITY_WORKDIR/requirements.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
+```
+
+To merge with an existing checkpoint:
+
+```bash
+python3 scripts/write_checkpoint.py "$ENTITY_WORKDIR/requirements.json" \
+  --merge "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
+```
+
+See `references/json-contracts.md` for the full checkpoint schema. Write atomically: temporary file first, then replace the target JSON.
+
+### 6. Plan Selected Dependencies
 
 Choose a dependency set that satisfies `requirements.json` with the least conflict.
 
-Core selection:
-
-- `cmake`;
-- `compiler`;
-- `kokkos`.
-
-Conditional selection:
-
-- `gpu_toolkit` for CUDA/HIP;
-- `mpi` only when `requirements.environment.mpi=true`;
-- `adios2` and `hdf5` when `requirements.environment.output=true`.
+Core selection: `cmake`, `compiler`, `kokkos`. Conditional: `gpu_toolkit` for CUDA/HIP; `mpi` only when required; `adios2` + `hdf5` when `output=true`.
 
 Selection rules:
 
@@ -282,13 +227,11 @@ Selection rules:
 - Build ADIOS2 with Kokkos support only for the `modern` profile.
 - For MPI, keep `mpicxx`, `mpirun`, Kokkos, ADIOS2, HDF5, and Entity in one MPI/compiler context.
 - For output, keep ADIOS2 and HDF5 serial/MPI context consistent with the MPI requirement.
-- If local source builds are needed, read `references/dependency-build-scripts.md` and generate scripts with `scripts/generate_dependency_build_scripts.py`.
+- If local source builds are needed, read `references/dependency-build-scripts.md`.
 
-Record rejected candidates and reasons. This matters for later debugging.
+Record rejected candidates and reasons.
 
-### 6. User Confirmation Gate
-
-Ask only for choices that affect dependency graph, ABI, build output, or installation location.
+### 7. User Confirmation Gate
 
 Confirm when:
 
@@ -323,7 +266,7 @@ Write every decision to JSON:
 
 If later probes invalidate a confirmed decision, mark it stale and re-enter this gate.
 
-### 7. Generate Source-Build Scripts When Needed
+### 8. Generate Source-Build Scripts When Needed
 
 Only do this after local/system reuse fails and the user has approved source builds. Use:
 
@@ -334,179 +277,46 @@ python scripts/generate_dependency_build_scripts.py "$ENTITY_WORKDIR/requirement
 
 Generated dependency scripts live under `$ENTITY_WORKDIR/generated/source-build-scripts/` and must not write into `ENTITY_CHECKOUT`. Review the generated script options against `requirements.json`, then execute only the missing dependency builds. After execution, update selected dependency entries with prefixes, CMake config paths, compiler signatures, and validation evidence.
 
-### 8. Write JSON Checkpoint
-
-The JSON is the source of truth for phase 1.
-
-Required top-level shape:
-
-```json
-{
-  "schema_version": 1,
-  "generated_at": "",
-  "requirements": {},
-  "target": {},
-  "entity": {},
-  "candidates": {},
-  "selected": {},
-  "decisions": {},
-  "paths": {},
-  "build_scripts": {},
-  "compatibility": {},
-  "env_sh": {},
-  "status": {}
-}
-```
-
-Minimum field intent:
-
-- `requirements`: pointer to or embedded copy of the current `requirements.json` content.
-- `target`: host/node context, OS, shell, login vs compute context.
-- `entity`: checkout root, branch/commit, version bucket, dependency docs source.
-- `candidates`: discovered options, including rejected or incompatible candidates.
-- `selected`: chosen dependency set.
-- `decisions`: user confirmations, request-derived decisions, defaults, and auto-detections.
-- `paths`: `PATH`, `CMAKE_PREFIX_PATH`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` entries needed for the selected set.
-- `build_scripts`: source-build script source, generated script path, command, options, deviations.
-- `compatibility`: independent compatibility check result.
-- `env_sh`: generated loader status and path.
-- `status`: checkpoint completeness and readiness for Entity build.
-
-Write atomically: temporary file first, then replace the target JSON.
-
 ### 9. Compatibility Check
 
-Run compatibility after dependency JSON write/repair, and before `env.sh` generation.
+Run compatibility after dependency JSON is written, and before `env.sh` generation.
 
-For the detailed checklist and expected evidence shape, read `references/compatibility-check.md`.
-
-Use the bundled checker:
+For the detailed checklist, read `references/compatibility-check.md`.
 
 ```bash
-python scripts/check_compatibility.py "$ENTITY_WORKDIR/requirements.json" \
+python3 scripts/check_compatibility.py "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
 ```
 
-Required checks:
-
-- selected dependencies satisfy `requirements.json`;
-- selected C++ standard, Kokkos family, ADIOS2 family, and ADIOS2 Kokkos support match the Entity version profile;
-- CMake, compiler, and Kokkos are present;
-- `requirements.environment.output=true` implies ADIOS2 and HDF5 are present;
-- selected compiler/toolchain is consistent across dependencies;
-- CUDA backend uses Kokkos `nvcc_wrapper`;
-- `nvcc_wrapper` host compiler is compatible with CUDA and the chosen toolchain;
-- GPU architecture matches target run hardware, not merely login node;
-- MPI-on/off is consistent across Kokkos, ADIOS2, HDF5, and Entity;
-- ADIOS2/HDF5 serial/MPI modes match;
-- required `*Config.cmake` files exist and can be discovered through `CMAKE_PREFIX_PATH`;
-- runtime library paths exist;
-- selected versions match the Entity version bucket.
-
-Compatibility output:
-
-```json
-{
-  "status": "pass|fail|partial",
-  "checked_at": "",
-  "checks": [],
-  "issues": []
-}
-```
-
-Only `status=pass` allows `env.sh` generation for normal Entity build. If compatibility fails, write issues to JSON and stop before Entity build.
+Only `status=pass` allows `env.sh` generation. If compatibility fails, fix issues and re-run.
 
 ### 10. Generate env.sh From JSON
 
-After compatibility passes, generate a local environment loader from `entity-deps.local.json`. The generator must refuse normal execution unless `compatibility.status=pass`.
-
-Use the bundled Python script:
-
-```text
-scripts/generate_env_sh.py
-```
-
-Expected interface:
+After compatibility passes, generate a local environment loader. The generator refuses unless `compatibility.status=pass`.
 
 ```bash
-python scripts/generate_env_sh.py entity-deps.local.json --output "$ENTITY_WORKDIR/env.sh"
+python3 scripts/generate_env_sh.py "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/env.sh"
 ```
 
-`env.sh` is derived from JSON. Do not hand-edit it as the source of truth.
+`env.sh` is derived from the checkpoint JSON. Do not hand-edit it. For site-specific extra environment variables (e.g. `ROCM_PATH`, `OMPI_CC`), record them in `entity-deps.local.json.paths.extra_env` before generation.
 
-Generated `env.sh` should include:
-
-```bash
-export ENTITY_DEPS_JSON="..."
-export ENTITY_DEPS_ROOT="..."
-export PATH="..."
-export CMAKE_PREFIX_PATH="..."
-export LD_LIBRARY_PATH="..."
-export DYLD_LIBRARY_PATH="..."
-export CC="..."
-export CXX="..."
-export MPICXX="..."
-```
-
-For CUDA backend:
-
-```bash
-export CXX="/path/to/kokkos/bin/nvcc_wrapper"
-export NVCC_WRAPPER_DEFAULT_COMPILER="/path/to/host/c++"
-```
-
-After generation, minimally validate:
-
-```bash
-source env.sh
-cmake --version
-"$CXX" --version
-test -f "$ENTITY_DEPS_JSON"
-```
-
-Write `env_sh.path`, `env_sh.status`, and validation evidence back to JSON.
+After generation, minimally validate: source it and verify `cmake --version`, `"$CXX" --version`.
 
 ### 11. Generate And Execute entity-build.sh
 
-After `env.sh` is generated, create an Entity build script from `requirements.json` and `env.sh`.
-
-Use the bundled Python script:
-
-```text
-scripts/generate_entity_build_sh.py
-```
-
-Expected interface:
+After `env.sh` is generated, create an Entity build script:
 
 ```bash
-python scripts/generate_entity_build_sh.py requirements.json --env "$ENTITY_WORKDIR/env.sh" --output "$ENTITY_WORKDIR/entity-build.sh"
+python3 scripts/generate_entity_build_sh.py "$ENTITY_WORKDIR/requirements.json" \
+  --env "$ENTITY_WORKDIR/env.sh" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/entity-build.sh"
 ```
 
-`entity-build.sh` is derived from `requirements.json` and `env.sh`. Do not hand-edit it as the source of truth.
+`--checkpoint` enables gate validation: the generator verifies compatibility is `pass` and env.sh matches the checkpoint. Omit `--checkpoint` only for debugging.
 
-The generated script must:
-
-1. `source env.sh`;
-2. `cd` to the Entity checkout root from `requirements.json`;
-3. generate a `cmake -B <build-dir> -D pgen=<...> ...` or `-D pgens=<...>` command from `requirements.compile`;
-4. keep `output`, `mpi`, `gpu_aware_mpi`, backend, architecture, `DEBUG`, and `TESTS` consistent with `requirements.json`;
-5. run `cmake --build <build-dir> -j <jobs>`;
-6. optionally run `ctest` when `requirements.compile.tests=true`;
-7. optionally run `cmake --install` when `requirements.compile.install=true`.
-
-The script should fail fast:
-
-```bash
-set -euo pipefail
-```
-
-After generation, minimally inspect or validate:
-
-```bash
-bash -n entity-build.sh
-grep -n "source .*env.sh" entity-build.sh
-grep -n "cmake -B" entity-build.sh
-```
+The generated script sources `env.sh`, runs `cmake -B` configure then `cmake --build`, respects all `requirements.compile` options, and fails fast with `set -euo pipefail`.
 
 Then execute:
 
@@ -518,28 +328,14 @@ Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_s
 
 ### 12. Handoff / Completion Criteria
 
-Start and complete Entity source build only when:
+Entity build may start only when all are true:
 
-```json
-{
-  "status": {
-    "checkpoint": "complete",
-    "satisfies_requirements_json": true,
-    "ready_for_entity_build": true
-  },
-  "compatibility": {
-    "status": "pass"
-  },
-  "env_sh": {
-    "status": "generated"
-  },
-  "entity_build_script": {
-    "status": "generated"
-  }
-}
-```
+- `status.checkpoint == "complete"` and `satisfies_requirements_json == true`
+- `compatibility.status == "pass"`
+- `env_sh.status == "generated"`
+- `entity_build_script.status == "generated"`
 
-Entity build phase must start by executing `entity-build.sh`. It must not reconstruct dependency state from chat history or ad hoc shell variables.
+Entity build phase must start by executing `entity-build.sh`. Do not reconstruct state from chat history or transient shell variables.
 
 ## Output Contract
 

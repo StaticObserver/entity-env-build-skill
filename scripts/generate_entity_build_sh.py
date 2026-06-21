@@ -7,10 +7,13 @@ import argparse
 import json
 import os
 import shlex
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from _version_profile import inferred_cxx_standard
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -37,31 +40,35 @@ def bool_on(value: Any) -> str:
     return "ON" if bool(value) else "OFF"
 
 
-def inferred_cxx_standard(req: dict[str, Any]) -> str:
-    compile_cfg = req.get("compile", {})
-    if isinstance(compile_cfg, dict) and compile_cfg.get("cxx_standard"):
-        return str(compile_cfg["cxx_standard"])
-    entity = req.get("entity", {})
-    if isinstance(entity, dict):
-        profile = str(entity.get("dependency_profile") or "").lower()
-        if profile == "modern":
-            return "20"
-        if profile == "legacy":
-            return "17"
-        version = str(entity.get("version_bucket") or entity.get("version") or "").lower()
-        if not version:
-            raise SystemExit("requirements.json missing entity.version_bucket or entity.dependency_profile")
-        digits = []
-        for part in version.removeprefix("v").replace("x", "0").split("."):
-            if part.isdigit():
-                digits.append(int(part))
-            else:
-                break
-        if len(digits) >= 2 and (digits[0], digits[1]) <= (1, 4):
-            return "17"
-        if len(digits) >= 2:
-            return "20"
-    raise SystemExit("requirements.json missing entity.version_bucket or entity.dependency_profile")
+def _verify_checkpoint_gate(checkpoint: dict[str, Any], env_sh: Path) -> None:
+    """Verify compatibility and env.sh are consistent before allowing build script generation."""
+    compat = checkpoint.get("compatibility", {})
+    if not isinstance(compat, dict):
+        raise SystemExit("entity-deps.local.json missing compatibility section")
+    if compat.get("status") != "pass":
+        raise SystemExit(
+            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass'. "
+            f"Run check_compatibility.py first."
+        )
+
+    checkpoint_env = checkpoint.get("env_sh", {})
+    if isinstance(checkpoint_env, dict):
+        recorded_path = checkpoint_env.get("path", "")
+        if recorded_path and Path(recorded_path).resolve() != env_sh.resolve():
+            print(
+                f"WARNING: checkpoint env_sh.path ({recorded_path}) differs from "
+                f"--env argument ({env_sh}). The env.sh may be stale or from a different "
+                f"checkpoint. Proceeding but verify this is intentional.",
+                file=sys.stderr,
+            )
+
+    ck_status = checkpoint.get("status", {})
+    if isinstance(ck_status, dict) and ck_status.get("ready_for_entity_build") is False:
+        print(
+            "WARNING: checkpoint status.ready_for_entity_build is False. "
+            "Proceeding but ensure the environment is ready.",
+            file=sys.stderr,
+        )
 
 
 def require_string(obj: dict[str, Any], path: str) -> str:
@@ -188,6 +195,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("requirements_json", type=Path)
     parser.add_argument("--env", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, help="entity-deps.local.json for gate validation")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--no-update-json", action="store_true")
     args = parser.parse_args()
@@ -195,6 +203,24 @@ def main() -> None:
     req = load_json(args.requirements_json)
     if not args.env.exists():
         raise SystemExit(f"env.sh not found: {args.env}")
+
+    if args.checkpoint:
+        if not args.checkpoint.exists():
+            raise SystemExit(f"entity-deps.local.json not found: {args.checkpoint}")
+        checkpoint = load_json(args.checkpoint)
+        _verify_checkpoint_gate(checkpoint, args.env.resolve())
+        env_fingerprint = (
+            checkpoint.get("env_sh", {}).get("generated_at", "")
+            if isinstance(checkpoint.get("env_sh"), dict)
+            else ""
+        )
+    else:
+        print(
+            "WARNING: --checkpoint not provided. Skipping compatibility gate validation. "
+            "Use --checkpoint for production builds.",
+            file=sys.stderr,
+        )
+        env_fingerprint = ""
     if args.output is None:
         artifacts = req.get("artifacts", {})
         if isinstance(artifacts, dict) and artifacts.get("entity_build_sh"):
@@ -225,6 +251,8 @@ def main() -> None:
                 "generated_from": {
                     "requirements_json": str(args.requirements_json.resolve()),
                     "env_sh": str(args.env.resolve()),
+                    "env_fingerprint": env_fingerprint,
+                    "checkpoint_json": str(args.checkpoint.resolve()) if args.checkpoint else "",
                 },
             }
         )

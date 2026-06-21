@@ -17,28 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-DEFAULT_VERSION_PROFILES = {
-    "legacy": {
-        "name": "legacy",
-        "cxx_standard": "17",
-        "kokkos_family": "4.x",
-        "kokkos_default": "",
-        "adios2_family": "2.10.x",
-        "adios2": "2.10.2",
-        "adios2_uses_kokkos": False,
-    },
-    "modern": {
-        "name": "modern",
-        "cxx_standard": "20",
-        "kokkos_family": "5.x",
-        "kokkos_default": "5.0.1",
-        "adios2_family": "2.11.x",
-        "adios2": "2.11.0",
-        "adios2_uses_kokkos": True,
-    },
-}
-DEFAULT_HDF5_VERSION = "1.14.6"
+from _version_profile import (
+    DEFAULT_HDF5_VERSION,
+    DEFAULT_VERSION_PROFILES as _DEFAULT_VERSION_PROFILES,
+    requested_version,
+    version_profile,
+)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -61,46 +45,9 @@ def q(value: Any) -> str:
     return shlex.quote(str(value))
 
 
-def entity_version_profile(req: dict[str, Any]) -> dict[str, Any]:
-    entity = req.get("entity", {})
-    if not isinstance(entity, dict):
-        raise SystemExit("requirements.json missing entity.version_bucket or entity.dependency_profile")
-    profile = str(entity.get("dependency_profile") or "").lower()
-    if profile in DEFAULT_VERSION_PROFILES:
-        return DEFAULT_VERSION_PROFILES[profile]
-
-    version = str(entity.get("version_bucket") or entity.get("version") or "").lower()
-    if not version:
-        raise SystemExit("requirements.json missing entity.version_bucket or entity.dependency_profile")
-    digits = []
-    for part in version.removeprefix("v").replace("x", "0").split("."):
-        if part.isdigit():
-            digits.append(int(part))
-        else:
-            break
-    if len(digits) >= 2 and (digits[0], digits[1]) <= (1, 4):
-        return DEFAULT_VERSION_PROFILES["legacy"]
-    return DEFAULT_VERSION_PROFILES["modern"]
-
-
-def requested_version(req: dict[str, Any], dep: str, profile: dict[str, Any]) -> str:
-    env = req.get("environment", {})
-    versions = env.get("dependency_versions", {}) if isinstance(env, dict) else {}
-    if isinstance(versions, dict) and versions.get(dep):
-        return str(versions[dep])
-    if dep == "kokkos":
-        default = str(profile["kokkos_default"])
-        if default:
-            return default
-        raise SystemExit(
-            "legacy profile requires requirements.environment.dependency_versions.kokkos "
-            "to pin an exact Kokkos 4.x source-build tag"
-        )
-    if dep == "adios2":
-        return str(profile["adios2"])
-    if dep == "hdf5":
-        return DEFAULT_HDF5_VERSION
-    raise KeyError(dep)
+# Backwards-compatible aliases for callers within this module
+DEFAULT_VERSION_PROFILES = _DEFAULT_VERSION_PROFILES
+entity_version_profile = version_profile
 
 
 def get_workdir(req: dict[str, Any]) -> Path:
