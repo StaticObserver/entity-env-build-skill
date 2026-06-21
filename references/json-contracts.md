@@ -83,7 +83,9 @@ Required shape:
     "build_dir": "",
     "install": false,
     "install_prefix": "",
-    "jobs": ""
+    "jobs": "",
+    "cmake_cxx_flags": "",
+    "extra_cmake_options": []
   },
   "artifacts": {
     "dependency_checkpoint_json": "",
@@ -91,6 +93,15 @@ Required shape:
     "entity_build_sh": "",
     "logs_dir": "",
     "generated_dir": ""
+  },
+  "slurm": {
+    "job_name": "",
+    "partition": "",
+    "nodes": 1,
+    "ntasks_per_node": 1,
+    "cpus_per_task": 8,
+    "gres": "",
+    "time": "01:00:00"
   },
   "decisions": {},
   "status": {
@@ -144,7 +155,9 @@ Required shape:
     "CMAKE_PREFIX_PATH": [],
     "LD_LIBRARY_PATH": [],
     "DYLD_LIBRARY_PATH": [],
-    "extra_env": {}
+    "extra_env": {},
+    "modules": [],
+    "pre_commands": []
   },
   "build_scripts": {},
   "compatibility": {
@@ -187,6 +200,41 @@ Selected dependency entries should use this shape when possible:
   "validation": {}
 }
 ```
+
+## Modules
+
+System modules to load in `env.sh` can be recorded as an ordered list under `paths.modules`:
+
+```json
+{
+  "paths": {
+    "modules": [
+      "compiler/gcc/12.2.0",
+      "compiler/cmake/3.25.0",
+      "compiler/dtk/24.04"
+    ]
+  }
+}
+```
+
+Each entry generates `module load <name>` inside an `if command -v module` guard. Modules load before PATH setup.
+
+## Pre-Commands
+
+Arbitrary shell commands injected into `env.sh` before PATH/modules setup. Use for sourcing module system init scripts or setting up non-standard environments:
+
+```json
+{
+  "paths": {
+    "pre_commands": [
+      "source /etc/profile.d/modules.sh",
+      "export CUSTOM_VAR=value"
+    ]
+  }
+}
+```
+
+Each string is emitted verbatim as a shell line. Use sparingly — prefer dedicated fields (`extra_env`, `modules`) when they exist.
 
 ## Extra Environment Variables
 

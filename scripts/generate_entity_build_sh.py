@@ -105,7 +105,7 @@ def default_build_dir(req: dict[str, Any]) -> str:
     return str(Path(workdir) / "build" / safe)
 
 
-def cmake_options(req: dict[str, Any]) -> list[str]:
+def cmake_options(req: dict[str, Any], selected: dict[str, Any] | None = None) -> list[str]:
     env = req.get("environment", {})
     compile_cfg = req.get("compile", {})
     pgen = compile_cfg.get("pgen")
@@ -129,6 +129,20 @@ def cmake_options(req: dict[str, Any]) -> list[str]:
         if isinstance(pgens, list):
             pgens = ",".join(str(item) for item in pgens)
         opts.insert(0, f"-Dpgens={pgens}")
+
+    # Explicit compiler selection from checkpoint (reference env vars, not paths)
+    if selected and isinstance(selected, dict):
+        compiler = selected.get("compiler", {})
+        if isinstance(compiler, dict) and compiler.get("cxx"):
+            opts.insert(0, '-DCMAKE_CXX_COMPILER="$CXX"')
+        if isinstance(compiler, dict) and compiler.get("cc"):
+            opts.insert(0, '-DCMAKE_C_COMPILER="$CC"')
+
+    # Compiler flags (e.g. -O1 workaround for Clang PHI node bug)
+    cmake_cxx_flags = compile_cfg.get("cmake_cxx_flags", "")
+    if cmake_cxx_flags:
+        opts.append(f'-DCMAKE_CXX_FLAGS={shlex.quote(str(cmake_cxx_flags))}')
+
     backend = str(env.get("backend") or "cpu").lower()
     gpu_arch = str(env.get("gpu_arch") or "")
     if backend == "cuda":
@@ -154,7 +168,7 @@ def shell_command(parts: list[str]) -> str:
     return " ".join(q(part) for part in parts)
 
 
-def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path) -> tuple[str, dict[str, str]]:
+def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path, selected: dict[str, Any] | None = None) -> tuple[str, dict[str, str]]:
     checkout = require_string(req, "entity.checkout_root")
     workdir = require_string(req, "entity.workdir")
     compile_cfg = req.setdefault("compile", {})
@@ -163,7 +177,7 @@ def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path) -> tuple[
     compile_cfg["cxx_standard"] = inferred_cxx_standard(req)
     jobs = str(compile_cfg.get("jobs") or "")
 
-    configure_parts = ["cmake", "-B", build_dir, *cmake_options(req)]
+    configure_parts = ["cmake", "-B", build_dir, *cmake_options(req, selected)]
     build_parts = ["cmake", "--build", build_dir]
     if jobs:
         build_parts.extend(["-j", jobs])
@@ -214,6 +228,7 @@ def main() -> None:
             if isinstance(checkpoint.get("env_sh"), dict)
             else ""
         )
+        selected = checkpoint.get("selected", {}) if isinstance(checkpoint.get("selected"), dict) else {}
     else:
         print(
             "WARNING: --checkpoint not provided. Skipping compatibility gate validation. "
@@ -221,6 +236,7 @@ def main() -> None:
             file=sys.stderr,
         )
         env_fingerprint = ""
+        selected = None
     if args.output is None:
         artifacts = req.get("artifacts", {})
         if isinstance(artifacts, dict) and artifacts.get("entity_build_sh"):
@@ -228,7 +244,7 @@ def main() -> None:
         else:
             workdir = require_string(req, "entity.workdir")
             args.output = Path(workdir) / "entity-build.sh"
-    script, meta = generate_script(req, args.requirements_json, args.env)
+    script, meta = generate_script(req, args.requirements_json, args.env, selected)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(script, encoding="utf-8")
     args.output.chmod(0o755)

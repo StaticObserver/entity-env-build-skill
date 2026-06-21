@@ -331,7 +331,10 @@ python3 scripts/generate_env_sh.py "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/env.sh"
 ```
 
-`env.sh` is derived from the checkpoint JSON. Do not hand-edit it. For site-specific extra environment variables (e.g. `ROCM_PATH`, `OMPI_CC`), record them in `entity-deps.local.json.paths.extra_env` before generation.
+`env.sh` is derived from the checkpoint JSON. Do not hand-edit it. For site-specific needs, record them in the JSON:
+- `paths.modules`: list of module names → `module load` commands
+- `paths.pre_commands`: arbitrary shell lines injected before PATH
+- `paths.extra_env`: extra `export VAR=VALUE` lines
 
 After generation, minimally validate: source it and verify `cmake --version`, `"$CXX" --version`.
 
@@ -350,10 +353,16 @@ python3 scripts/generate_entity_build_sh.py "$ENTITY_WORKDIR/requirements.json" 
 
 The generated script sources `env.sh`, runs `cmake -B` configure then `cmake --build`, respects all `requirements.compile` options, and fails fast with `set -euo pipefail`.
 
-Then execute:
+Then execute (directly or via SLURM):
 
 ```bash
 bash entity-build.sh
+
+# Or submit via SLURM:
+python3 scripts/generate_slurm_script.py "$ENTITY_WORKDIR/requirements.json" \
+  --build-script "$ENTITY_WORKDIR/entity-build.sh" \
+  --output "$ENTITY_WORKDIR/submit_entity.sh"
+sbatch "$ENTITY_WORKDIR/submit_entity.sh"
 ```
 
 Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_script.generated_from`, and execution result back to `requirements.json` or a build result section referenced by it.

@@ -150,10 +150,31 @@ def generate_env(data: dict[str, Any], json_path: Path) -> str:
         "set -euo pipefail",
         shell_export("ENTITY_DEPS_JSON", str(json_path.resolve())),
         shell_export("ENTITY_DEPS_ROOT", deps_root),
+    ]
+
+    # Pre-commands: arbitrary shell lines injected before PATH/modules
+    pre_commands = paths.get("pre_commands", []) if isinstance(paths, dict) else []
+    if isinstance(pre_commands, list) and pre_commands:
+        lines.append("")
+        lines.append("# Site-specific pre-commands from entity-deps.local.json")
+        lines.extend(str(cmd) for cmd in pre_commands if cmd)
+
+    # Modules: emit module load commands when present
+    modules = paths.get("modules", []) if isinstance(paths, dict) else []
+    if isinstance(modules, list) and modules:
+        lines.append("")
+        lines.append("# --- Modules ---")
+        lines.append("if command -v module &>/dev/null; then")
+        for mod in modules:
+            if mod:
+                lines.append(f"  module load {shlex.quote(str(mod))}")
+        lines.append("fi")
+
+    lines.extend([
         shell_path_export("PATH", path_entries),
         shell_path_export("CMAKE_PREFIX_PATH", cmake_entries),
         shell_path_export("LD_LIBRARY_PATH", ld_entries),
-    ]
+    ])
     if dyld_entries:
         lines.append(shell_path_export("DYLD_LIBRARY_PATH", dyld_entries))
     if cc:
