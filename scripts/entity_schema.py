@@ -154,6 +154,37 @@ KOKKOS_BACKEND_FLAGS: Dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# Minimum compiler versions by backend + profile
+# ---------------------------------------------------------------------------
+
+# (major, minor) tuples. None means "not required".
+CompilerMinVersions = Dict[str, Dict[str, Dict[str, Any]]]
+
+COMPILER_MIN_VERSIONS: CompilerMinVersions = {
+    "cpu": {
+        "modern": {"gcc": (10, 4), "clang": (12, 0)},
+        "legacy": {"gcc": (8, 0), "clang": (10, 0)},
+    },
+    "cuda": {
+        "modern": {"gcc": (10, 4), "nvcc": (12, 2), "clang": (12, 0)},
+        "legacy": {"gcc": (8, 0), "nvcc": (11, 0), "clang": (10, 0)},
+    },
+    "hip": {
+        "modern": {"gcc": (10, 4), "rocm": (5, 4), "clang": (14, 0)},
+        "legacy": {"gcc": (8, 0), "rocm": (5, 0), "clang": (12, 0)},
+    },
+}
+
+# Minimum CMake version required across all profiles
+MIN_CMAKE_VERSION = (3, 16)
+
+
+def version_satisfies(actual: tuple, minimum: tuple) -> bool:
+    """Check if *actual* version tuple satisfies *minimum* version tuple."""
+    return actual >= minimum
+
+
+# ---------------------------------------------------------------------------
 # source-build dependency list (order matters)
 # ---------------------------------------------------------------------------
 

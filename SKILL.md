@@ -374,16 +374,45 @@ Write every decision to JSON:
 
 If later probes invalidate a confirmed decision, mark it stale and re-enter this gate.
 
-#### 2h. Generate Source-Build Scripts When Needed
+#### 2h. Source-Build Dependencies (Isolated Sub-Agents)
 
-Only do this after local/system reuse fails and the user has approved source builds. Use:
+Only do this after local/system reuse fails and the user has approved source builds.
+
+For each missing dependency, in order: Kokkos → HDF5 → ADIOS2.
+
+**Step 1: Generate build script**
 
 ```bash
-python scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
-  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --deps <dep>
 ```
 
-Generated dependency scripts live under `$ENTITY_WORKDIR/generated/source-build-scripts/` and must not write into `ENTITY_CHECKOUT`. Review the generated script options against `requirements.json`, then execute only the missing dependency builds. After execution, update selected dependency entries with prefixes, CMake config paths, compiler signatures, and validation evidence.
+Generated scripts live under `$ENTITY_WORKDIR/generated/source-build-scripts/`.
+
+**Step 2: Launch sub-agent with clean context**
+
+Pass to the sub-agent:
+- Path to `requirements.json` (read-only)
+- Path to `entity-deps.local.json` (read-only)
+- `references/dependency-notes/<dep>.md` — build knowledge for this specific dependency
+- The generated build script path — execute it
+- Instruction: "Execute this build script. Capture configure/build/install output. If it fails, diagnose using the dependency notes. Do NOT modify any JSON files. Return structured result: {status, dep, prefix, cmake_config, version, compiler_signature, issues[]}"
+
+**Step 3: Sub-agent returns → main agent updates checkpoint**
+
+After sub-agent returns successfully, update `selected.<dep>` in entity-deps.local.json with prefix, cmake_config, version, compiler_signature, and validation evidence. Re-run compatibility check before proceeding to the next dependency.
+
+**Step 4: Repeat for next dependency**
+
+Kokkos → HDF5 → ADIOS2. Kokkos must build first. HDF5 and Kokkos can in theory be parallel but serial is safer (shared `$ENTITY_WORKDIR/deps/` install prefix). ADIOS2 must wait for both (its CMAKE_PREFIX_PATH includes both prefixes).
+
+**Skip sub-agent when** all of:
+- `selected.<dep>.provider != "source-build"` OR already has `validation.installed = true`
+- `selected.<dep>.prefix` path exists
+- `selected.<dep>.cmake_config` file exists
+
+**Sub-agent permissions**: `Bash(bash build-<dep>.sh)` and `Read` only — no write access.
 
 #### 2i. Compatibility Check (Isolated Sub-Agent)
 

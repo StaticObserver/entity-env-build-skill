@@ -289,7 +289,7 @@ def cmd_create(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="subcommand", required=True)
+    sub = parser.add_subparsers(dest="subcommand")
 
     # --- validate ---
     p_val = sub.add_parser("validate", help="Validate requirements.json completeness and consistency")
@@ -308,6 +308,9 @@ def main() -> None:
     add_json_flag(p_cre)
 
     args = parser.parse_args()
+    if args.subcommand is None:
+        parser.print_help()
+        raise SystemExit(1)
     if args.subcommand == "validate":
         cmd_validate(args)
     elif args.subcommand == "create":

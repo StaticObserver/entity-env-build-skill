@@ -134,6 +134,32 @@ def compiler_env(checkpoint: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+# Kokkos arch → CUDA compute capability mapping
+_KOKKOS_TO_CUDA_ARCH: Dict[str, str] = {
+    "AMPERE80": "80",
+    "AMPERE86": "86",
+    "VOLTA70": "70",
+    "VOLTA72": "72",
+    "TURING75": "75",
+    "PASCAL60": "60",
+    "PASCAL61": "61",
+    "MAXWELL50": "50",
+    "MAXWELL52": "52",
+    "MAXWELL53": "53",
+    "KEPLER30": "30",
+    "KEPLER32": "32",
+    "KEPLER35": "35",
+    "KEPLER37": "37",
+    "HOPPER90": "90",
+}
+
+
+def _kokkos_arch_to_cuda(arch: str) -> str:
+    """Convert Kokkos architecture name to CUDA compute capability (e.g., AMPERE80→80)."""
+    arch = arch.upper().replace("KOKKOS_ARCH_", "")
+    return _KOKKOS_TO_CUDA_ARCH.get(arch, "80")  # default to A100
+
+
 # ===========================================================================
 # Dependency script generation (used by subcommand: deps)
 # ===========================================================================
@@ -257,6 +283,25 @@ def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Pat
     if profile["adios2_uses_kokkos"]:
         prefix_parts.insert(0, str(workdir / "deps" / "kokkos"))
     cmake_prefix_base = ":".join(prefix_parts)
+    # CUDA + Kokkos requires explicit CMAKE_CUDA_COMPILER and ARCHITECTURES
+    cuda_extra = ""
+    if backend == "cuda" and profile["adios2_uses_kokkos"]:
+        selected = checkpoint.get("selected", {}) if isinstance(checkpoint, dict) else {}
+        gpu_toolkit = selected.get("gpu_toolkit", {}) if isinstance(selected, dict) else {}
+        cuda_prefix = str(gpu_toolkit.get("prefix") or "")
+        cuda_arch = str(selected.get("kokkos", {}).get("cuda_arch") or env.get("gpu_arch", ""))
+        if cuda_prefix and cuda_arch:
+            # Map Kokkos arch name to CUDA compute capability
+            arch_num = _kokkos_arch_to_cuda(cuda_arch)
+            stubs_path = f"{cuda_prefix}/targets/x86_64-linux/lib/stubs"
+            cuda_extra = f"""
+# CUDA + Kokkos: set CUDA compiler and architecture for enable_language(CUDA)
+export CMAKE_CUDA_COMPILER={q(cuda_prefix + '/bin/nvcc')}
+export CMAKE_CUDA_ARCHITECTURES={q(arch_num)}
+export LDFLAGS="-L{stubs_path} ${{LDFLAGS:-}}"
+export CMAKE_EXE_LINKER_FLAGS="-L{stubs_path} ${{CMAKE_EXE_LINKER_FLAGS:-}}"
+export CMAKE_SHARED_LINKER_FLAGS="-L{stubs_path} ${{CMAKE_SHARED_LINKER_FLAGS:-}}"
+"""
     opts = [
         '-DCMAKE_INSTALL_PREFIX="$PREFIX"',
         f"-DCMAKE_CXX_STANDARD={profile['cxx_standard']}",
@@ -286,6 +331,7 @@ export CMAKE_PREFIX_PATH="${{CMAKE_PREFIX_PATH_BASE}}${{CMAKE_PREFIX_PATH:+:$CMA
 if [ ! -d "$SRC/.git" ]; then
   git clone --depth 1 --branch "$VERSION" https://github.com/ornladios/ADIOS2.git "$SRC"
 fi
+{cuda_extra}
 cmake -S "$SRC" -B "$BUILD" \\
   {' '.join(opts)} 2>&1 | tee "$LOG_DIR/adios2-configure.log"
 cmake --build "$BUILD" -j "${{NCORES:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}}" 2>&1 | tee "$LOG_DIR/adios2-build.log"
@@ -443,8 +489,14 @@ def generate_env(data: Dict[str, Any], json_path: Path) -> str:
     if not isinstance(paths, dict):
         paths = {}
 
-    prefixes = unique([str(paths.get("ENTITY_DEPS_ROOT") or "")] + dep_prefixes(selected))
-    deps_root = prefixes[0] if prefixes else str(json_path.parent)
+    prefixes = dep_prefixes(selected)
+    # ENTITY_DEPS_ROOT is the common parent of all dep prefixes (usually $ENTITY_WORKDIR/deps)
+    if prefixes:
+        deps_root = str(Path(os.path.commonpath(prefixes)).parent) if len(prefixes) > 1 else str(Path(prefixes[0]).parent)
+    elif paths.get("ENTITY_DEPS_ROOT"):
+        deps_root = str(paths["ENTITY_DEPS_ROOT"])
+    else:
+        deps_root = str(json_path.parent)
     path_entries = unique([*(paths.get("PATH") or []), *dep_bins(selected)])
     cmake_entries = unique([*(paths.get("CMAKE_PREFIX_PATH") or []), *dep_prefixes(selected)])
     ld_entries = unique([*(paths.get("LD_LIBRARY_PATH") or []), *dep_libs(selected)])
@@ -494,13 +546,17 @@ def generate_env(data: Dict[str, Any], json_path: Path) -> str:
     if mpicxx:
         lines.append(shell_export("MPICXX", mpicxx))
 
-    # Extra env overrides
+    # Extra env overrides (skip keys already exported by auto-generated logic)
+    _already_exported = {"ENTITY_DEPS_JSON", "ENTITY_DEPS_ROOT", "PATH", "CMAKE_PREFIX_PATH",
+                         "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "CC", "CXX",
+                         "NVCC_WRAPPER_DEFAULT_COMPILER", "MPICXX"}
     extra_env = paths.get("extra_env", {}) if isinstance(paths, dict) else {}
     if isinstance(extra_env, dict) and extra_env:
-        lines.append("")
-        lines.append("# Site-specific environment overrides from entity-deps.local.json")
-        for var, val in extra_env.items():
-            if val:
+        deduped = {k: v for k, v in extra_env.items() if k not in _already_exported and v}
+        if deduped:
+            lines.append("")
+            lines.append("# Site-specific environment overrides from entity-deps.local.json")
+            for var, val in deduped.items():
                 lines.append(shell_export(str(var), str(val)))
 
     lines.append("")
@@ -812,7 +868,7 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="subcommand", required=True)
+    sub = parser.add_subparsers(dest="subcommand")
 
     # --- deps ---
     p_deps = sub.add_parser("deps", help="Generate dependency source-build scripts")
@@ -842,6 +898,10 @@ def main() -> None:
     add_json_flag(p_build)
 
     args = parser.parse_args()
+
+    if args.subcommand is None:
+        parser.print_help()
+        raise SystemExit(1)
 
     # Inject run_id for build subcommand
     if args.subcommand == "build":

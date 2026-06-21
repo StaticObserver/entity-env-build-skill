@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from _json_io import add_json_flag, load_json, protocol_error, protocol_ok, write_json_atomic
-from _version_profile import profile_for
+from _version_profile import profile_for, detect_profile_name
+from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, version_satisfies
 
 
 def add(
@@ -24,7 +25,7 @@ def add(
     check_id: str,
     status: str,
     summary: str,
-    evidence: Dict[str, Any] | None = None,
+    evidence: Optional[Dict[str, Any]] = None,
     remediation: str = "",
 ) -> None:
     checks.append(
@@ -447,6 +448,132 @@ def run_cross_checks(
 
 
 # ---------------------------------------------------------------------------
+# Compiler version pre-check
+# ---------------------------------------------------------------------------
+
+
+def _parse_gcc_version(version_str: str) -> tuple:
+    """Extract (major, minor) from GCC version string like '12.3.0'."""
+    import re as _re
+    m = _re.search(r"(\d+)\.(\d+)", version_str)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return (0, 0)
+
+
+def _check_compiler_min_versions(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    compiler: Dict[str, Any],
+    checkpoint: Dict[str, Any],
+    req: Dict[str, Any],
+) -> None:
+    """Check that selected compiler versions satisfy profile+backend minimums."""
+    env = req.get("environment", {}) if isinstance(req.get("environment"), dict) else {}
+    backend = str(env.get("backend") or "cpu").lower()
+    profile_name = detect_profile_name(req)
+    required = COMPILER_MIN_VERSIONS.get(backend, {}).get(profile_name, {})
+    if not required:
+        return
+
+    selected = checkpoint.get("selected", {}) if isinstance(checkpoint.get("selected"), dict) else {}
+    compiler_ver = str(compiler.get("version") or "")
+    gcc_version = _parse_gcc_version(compiler_ver)
+
+    # Check GCC version
+    if "gcc" in required and gcc_version > (0, 0):
+        min_gcc = required["gcc"]
+        if not version_satisfies(gcc_version, min_gcc):
+            msg = (
+                f"GCC {gcc_version[0]}.{gcc_version[1]} is below minimum "
+                f"{min_gcc[0]}.{min_gcc[1]} for {backend}/{profile_name}"
+            )
+            add(checks, "compiler.version.gcc", "fail", msg,
+                {"actual": list(gcc_version), "required": list(min_gcc)},
+                remediation=f"Upgrade GCC to {min_gcc[0]}.{min_gcc[1]}+ or select a newer module/spack compiler.")
+            issues.append(msg)
+        else:
+            add(checks, "compiler.version.gcc", "pass",
+                f"GCC {gcc_version[0]}.{gcc_version[1]} satisfies minimum",
+                {"version": list(gcc_version)})
+
+    # Check NVCC version
+    gpu_toolkit = selected.get("gpu_toolkit", {}) if isinstance(selected, dict) else {}
+    nvcc_ver = str(gpu_toolkit.get("version") or "")
+    if "nvcc" in required and nvcc_ver:
+        nvcc_version = _parse_gcc_version(nvcc_ver)
+        if nvcc_version > (0, 0):
+            min_nvcc = required["nvcc"]
+            if not version_satisfies(nvcc_version, min_nvcc):
+                msg = (
+                    f"NVCC {nvcc_version[0]}.{nvcc_version[1]} is below minimum "
+                    f"{min_nvcc[0]}.{min_nvcc[1]} for {backend}/{profile_name}"
+                )
+                add(checks, "compiler.version.nvcc", "fail", msg,
+                    {"actual": list(nvcc_version), "required": list(min_nvcc)},
+                    remediation=f"Upgrade CUDA toolkit to {min_nvcc[0]}.{min_nvcc[1]}+")
+                issues.append(msg)
+            else:
+                add(checks, "compiler.version.nvcc", "pass",
+                    f"NVCC {nvcc_version[0]}.{nvcc_version[1]} satisfies minimum",
+                    {"version": list(nvcc_version)})
+
+    # Check CMake minimum version
+    cmake_entry = selected.get("cmake", {}) if isinstance(selected, dict) else {}
+    cmake_ver = str(cmake_entry.get("version") or "")
+    if cmake_ver:
+        cmake_version = _parse_gcc_version(cmake_ver)
+        if cmake_version > (0, 0) and not version_satisfies(cmake_version, MIN_CMAKE_VERSION):
+            msg = (
+                f"CMake {cmake_version[0]}.{cmake_version[1]} is below minimum "
+                f"{MIN_CMAKE_VERSION[0]}.{MIN_CMAKE_VERSION[1]}"
+            )
+            add(checks, "compiler.version.cmake", "fail", msg,
+                {"actual": list(cmake_version), "required": list(MIN_CMAKE_VERSION)},
+                remediation=f"Install CMake {MIN_CMAKE_VERSION[0]}.{MIN_CMAKE_VERSION[1]}+")
+            issues.append(msg)
+
+
+# ---------------------------------------------------------------------------
+# ADIOS2 install integrity validation (for source-build deps)
+# ---------------------------------------------------------------------------
+
+
+_ADIOS2_REQUIRED_TARGETS = [
+    "adios2-targets.cmake",
+    "adios2-targets-release.cmake",
+    "adios2-c-targets.cmake",
+    "adios2-c-targets-release.cmake",
+    "adios2-cxx-targets.cmake",
+    "adios2-cxx-targets-release.cmake",
+]
+
+
+def validate_adios2_install_integrity(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    adios2_entry: Dict[str, Any],
+) -> bool:
+    """Verify ADIOS2 cmake install is complete (all targets files present)."""
+    cmake_config = _real_path(adios2_entry.get("cmake_config"))
+    if cmake_config is None:
+        return False
+    config_dir = cmake_config.parent
+    missing = [t for t in _ADIOS2_REQUIRED_TARGETS if not (config_dir / t).is_file()]
+    if missing:
+        add(checks, "dependency.adios2.targets", "fail",
+            f"ADIOS2 install incomplete: missing {len(missing)} targets files",
+            {"missing": missing, "config_dir": str(config_dir)},
+            remediation="Re-run cmake --install or manually copy missing targets files from build tree.")
+        issues.append(f"ADIOS2 missing targets: {', '.join(missing)}")
+        return False
+    add(checks, "dependency.adios2.targets", "pass",
+        "ADIOS2 cmake install is complete (all targets files present)",
+        {"config_dir": str(config_dir)})
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main check runner
 # ---------------------------------------------------------------------------
 
@@ -603,6 +730,7 @@ def run_checks(
         issues.append("C++ compiler is not selected")
     else:
         validate_compiler_executable(checks, issues, compiler)
+        _check_compiler_min_versions(checks, issues, compiler, checkpoint, req)
 
     # -- Section 4: Backend check -------------------------------------------
     env = req.get("environment", {})
@@ -689,6 +817,9 @@ def run_checks(
             issues.append(f"{dep} is not selected")
             continue
         validate_dependency_paths(checks, issues, dep, entry)
+        # P2: ADIOS2 install integrity check
+        if dep == "adios2" and entry.get("provider") == "source-build":
+            validate_adios2_install_integrity(checks, issues, entry)
         if not has_installed_dependency(checkpoint, dep):
             add(
                 checks,
