@@ -125,6 +125,8 @@ $ENTITY_WORKDIR/generated/source-build-scripts/
 
 Ask the user these questions. For each, record a decision even if using the default. Do not probe the system to answer them — these are user intent, not environment discovery.
 
+**Critical rule**: You MUST ask every question in the table below. Do NOT silently apply defaults — the user must see and confirm every choice. If the user says "use defaults", list the defaults explicitly and ask for confirmation.
+
 | Question | Options | Default | Notes |
 | --- | --- | --- | --- |
 | Problem generator (`pgen`) | built-in name, `pgens/...`, or path | *required* | Changing pgen later requires a fresh build dir |
@@ -132,7 +134,7 @@ Ask the user these questions. For each, record a decision even if using the defa
 | Enable MPI? | `true` / `false` | `false` | Don't enable just because mpicxx exists |
 | GPU-aware MPI? | `true` / `false` | `false` | Only relevant when MPI + GPU both on |
 | Enable output? | `true` / `false` | `true` | `true` implies ADIOS2 + HDF5 |
-| Build intent | `smoke` / `production` / `debug` / `unspecified` | `unspecified` | Affects optimization level and strictness |
+| Build intent / optimization | `smoke` (-O0) / `debug` (-Og) / `production` (-O2) / `unspecified` | `unspecified` | Affects optimization level (-O1/-O2/-O3/-Ofast) |
 | Precision | `single` / `double` | `single` | |
 | Deposit scheme | `zigzag` / `esirkepov` | `zigzag` | |
 | Shape order | `1` to `11` | `1` | |
@@ -140,12 +142,52 @@ Ask the user these questions. For each, record a decision even if using the defa
 | Compile tests? | `true` / `false` | `false` | |
 | Dependency policy | `reuse-existing` / `allow-local-build` | `reuse-existing` | Source build is last resort |
 
+Additional questions that are **required** (not optional) in these scenarios:
+
+| Scenario | Required Question |
+| --- | --- |
+| Backend is CUDA or HIP | GPU architecture (e.g. `AMPERE80`, `AMD_GFX906`) — NEVER guess or auto-detect at this phase |
+| Backend is HIP | ROCm/DTK version preference (e.g. DTK 24.04, 25.04, latest available) |
+| Multiple compilers available | Compiler family and version preference (GCC version, Clang version, etc.) |
+| Backend is HIP | Optimization level: production defaults to -O2 but warn the user that ROCm/Clang may require -O1 |
+
 Additional questions when the answer is not obvious from context:
 
 - Entity version (auto-detect from checkout if possible; otherwise ask)
-- GPU architecture (e.g. `AMPERE80`, `AMD_GFX906`) — needed when backend is GPU
 - Exact dependency version tags — only if user wants to pin specific versions
 - Install prefix — only if user wants `cmake --install`
+
+##### Configuration Confirmation Gate
+
+After collecting all answers and before writing `requirements.json`, you MUST:
+
+1. Present a summary table of ALL configuration choices.
+2. Ask the user to confirm: "These are the settings I will use. Confirm or adjust any item."
+3. Only proceed to write `requirements.json` after explicit user approval.
+
+Example summary format:
+
+```
+Build Configuration Summary:
+  ENTITY_CHECKOUT:  /path/to/entity/1.3.3
+  ENTITY_WORKDIR:   /path/to/entity/problems/reconnection
+  PGen:             reconnection
+  Backend:          HIP (ROCm)
+  GPU Architecture: AMD_GFX906
+  MPI:              ON
+  GPU-aware MPI:    OFF
+  Output:           ON (ADIOS2 + HDF5)
+  Precision:        single
+  Deposit:          zigzag
+  Shape order:      1
+  Optimization:     -O2 (production) — note: may need -O1 for ROCm/Clang
+  Debug:            OFF
+  Tests:            OFF
+  C++ Standard:     17 (legacy profile)
+  Dependency policy: reuse-existing
+
+Proceed with these settings?
+```
 
 #### 1c. Write And Validate requirements.json
 
@@ -360,6 +402,53 @@ bash entity-build.sh
 ```
 
 Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_script.generated_from`, and execution result back to `requirements.json` or a build result section referenced by it.
+
+##### Build Failure Diagnosis
+
+When the build fails, do NOT blindly retry. Diagnose using this decision tree:
+
+**CMake configure failures:**
+
+| Symptom | Likely Cause | Action |
+| --- | --- | --- |
+| `CMake version too old` | System cmake < 3.16 | Search for newer cmake (module, conda, pip, local prefix) |
+| `FindMPI: MPI_C not found` | MPI wrapper compiler mismatch | Check `mpicc --showme` output; consider explicit `-DMPI_C_INCLUDE_DIRS`/`-DMPI_CXX_LIBRARIES` |
+| `FindXXX: not found` | Missing cmake config | Verify `CMAKE_PREFIX_PATH` includes dependency prefix; check for `*Config.cmake` |
+| `FetchContent / download failed` | No internet on compute node | Ask user: "Network unavailable. Options: (1) find local alternative, (2) upload missing dependency, (3) skip if optional" |
+
+**Compilation failures (cmake --build):**
+
+| Symptom | Likely Cause | Action |
+| --- | --- | --- |
+| `Broken function found, compilation aborted!` | Compiler optimization bug (common on ROCm/Clang 15) | Immediately ask: "Compiler backend crash at -O2/-O3. Try -O1 instead?" Set `compile.cmake_cxx_flags: "-O1 -DNDEBUG"` |
+| `PHI node entries do not match` | Same compiler optimization bug | Same as above — reduce optimization level |
+| `undefined reference to ...` | ABI mismatch or missing link library | Check all pre-built deps use same compiler family; verify `LD_LIBRARY_PATH` |
+| `error: invalid target ID 'gfxXXX'` | GPU architecture mismatch | Kokkos was built for different GPU arch than current node. Check `Kokkos_ARCH_*` vs node GPU |
+
+**SLURM/job failures:**
+
+| Symptom | Likely Cause | Action |
+| --- | --- | --- |
+| Job pending forever | Wrong partition | Verify partition has required GPU (`sinfo -p <partition>`). CPU nodes can't build GPU targets |
+| `CUDA/ROCm not found` on compute node | GPU-less partition | Switch to GPU partition; check `--gres` specification |
+| Job killed (OOM) | Insufficient memory | Increase `--mem` or reduce parallel jobs (`-j4` instead of full cores) |
+
+##### Network-Unavailable Scenario
+
+When `FetchContent`, `git clone`, or any network download fails during cmake configure:
+
+**You MUST ask the user before taking action.** Present these options:
+
+1. **Find local alternative**: "I'll search for an existing local installation of this dependency."
+2. **Ask user to provide**: "Can you upload or copy the dependency to an accessible path?"
+3. **Skip if optional**: "Is this dependency optional and safe to disable?"
+
+After user chooses, record the decision in `decisions` and update `entity-deps.local.json`.
+
+For the specific case of Entity's `plog` FetchContent dependency (common in all Entity builds):
+- Run `cmake configure` on a login node (with internet) first
+- Set `FETCHCONTENT_FULLY_DISCONNECTED=ON` in CMakeCache.txt before submitting to compute node
+- Cache the downloaded content with `FETCHCONTENT_SOURCE_DIR_PLOG`
 
 #### 3c. Handoff / Completion Criteria
 

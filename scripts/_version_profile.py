@@ -5,12 +5,10 @@ and generate_entity_build_sh.py to avoid duplicating the legacy/modern
 profile derivation and version-family constants.
 """
 
-from __future__ import annotations
-
-from typing import Any
+from typing import Any, Dict, Tuple
 
 
-PROFILES: dict[str, dict[str, Any]] = {
+PROFILES: Dict[str, Dict[str, Any]] = {
     "legacy": {
         "cxx_standard": "17",
         "kokkos": "4.",
@@ -25,7 +23,7 @@ PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-DEFAULT_VERSION_PROFILES: dict[str, dict[str, Any]] = {
+DEFAULT_VERSION_PROFILES: Dict[str, Dict[str, Any]] = {
     "legacy": {
         "name": "legacy",
         "cxx_standard": "17",
@@ -49,7 +47,7 @@ DEFAULT_VERSION_PROFILES: dict[str, dict[str, Any]] = {
 DEFAULT_HDF5_VERSION = "1.14.6"
 
 
-def detect_profile_name(req: dict[str, Any]) -> str:
+def detect_profile_name(req: Dict[str, Any]) -> str:
     """Return 'legacy' or 'modern' based on requirements.entity fields."""
     entity = req.get("entity", {})
     if not isinstance(entity, dict):
@@ -77,19 +75,19 @@ def detect_profile_name(req: dict[str, Any]) -> str:
     return "modern"
 
 
-def profile_for(req: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def profile_for(req: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Return (profile_name, profile_dict) suitable for compatibility checks."""
     name = detect_profile_name(req)
     return name, PROFILES[name]
 
 
-def version_profile(req: dict[str, Any]) -> dict[str, Any]:
+def version_profile(req: Dict[str, Any]) -> Dict[str, Any]:
     """Return the full default-version profile dict (for source-build scripts)."""
     name = detect_profile_name(req)
     return DEFAULT_VERSION_PROFILES[name]
 
 
-def inferred_cxx_standard(req: dict[str, Any]) -> str:
+def inferred_cxx_standard(req: Dict[str, Any]) -> str:
     """Derive C++ standard from requirements.compile or entity profile."""
     compile_cfg = req.get("compile", {})
     if isinstance(compile_cfg, dict) and compile_cfg.get("cxx_standard"):
@@ -122,7 +120,7 @@ def inferred_cxx_standard(req: dict[str, Any]) -> str:
     )
 
 
-def requested_version(req: dict[str, Any], dep: str, profile: dict[str, Any]) -> str:
+def requested_version(req: Dict[str, Any], dep: str, profile: Dict[str, Any]) -> str:
     """Return the concrete source-build tag for *dep*.
 
     Consults requirements.environment.dependency_versions first, then falls

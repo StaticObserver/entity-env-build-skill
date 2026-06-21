@@ -5,20 +5,19 @@ Implements checks described in references/compatibility-check.md.
 Sections referenced in comments map to that document.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from _version_profile import profile_for
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -26,7 +25,7 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, delete=False
@@ -37,11 +36,11 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 
 
 def add(
-    checks: list[dict[str, Any]],
+    checks: List[Dict[str, Any]],
     check_id: str,
     status: str,
     summary: str,
-    evidence: dict[str, Any] | None = None,
+    evidence: Dict[str, Any] | None = None,
     remediation: str = "",
 ) -> None:
     checks.append(
@@ -60,7 +59,7 @@ def add(
 # ---------------------------------------------------------------------------
 
 
-def _real_path(value: Any) -> Path | None:
+def _real_path(value: Any) -> Optional[Path]:
     """Return a Path if *value* is a non-empty string, otherwise None."""
     if value and isinstance(value, str):
         return Path(value)
@@ -68,10 +67,10 @@ def _real_path(value: Any) -> Path | None:
 
 
 def validate_dependency_paths(
-    checks: list[dict[str, Any]],
-    issues: list[str],
+    checks: List[Dict[str, Any]],
+    issues: List[str],
     dep: str,
-    entry: dict[str, Any],
+    entry: Dict[str, Any],
 ) -> bool:
     """Verify that recorded prefix / cmake_config / bin paths exist on disk.
 
@@ -85,7 +84,7 @@ def validate_dependency_paths(
     config_ok = cmake_config is not None and cmake_config.is_file()
     bin_ok = bin_path is not None and bin_path.exists()
 
-    missing: list[str] = []
+    missing: List[str] = []
 
     if prefix is not None and not prefix_ok:
         missing.append(f"prefix: {prefix}")
@@ -132,9 +131,9 @@ def validate_dependency_paths(
 
 
 def validate_compiler_executable(
-    checks: list[dict[str, Any]],
-    issues: list[str],
-    compiler: dict[str, Any],
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    compiler: Dict[str, Any],
 ) -> bool:
     """Check that compiler.cxx (and .cc if present) exist and are executable."""
     ok = True
@@ -181,7 +180,7 @@ def validate_compiler_executable(
 # ---------------------------------------------------------------------------
 
 
-def selected_version(checkpoint: dict[str, Any], dep: str) -> str:
+def selected_version(checkpoint: Dict[str, Any], dep: str) -> str:
     selected = checkpoint.get("selected", {})
     if isinstance(selected, dict) and isinstance(selected.get(dep), dict):
         version = selected[dep].get("version")
@@ -195,7 +194,7 @@ def selected_version(checkpoint: dict[str, Any], dep: str) -> str:
     return ""
 
 
-def adios2_uses_kokkos(checkpoint: dict[str, Any]) -> bool | None:
+def adios2_uses_kokkos(checkpoint: Dict[str, Any]) -> Optional[bool]:
     selected = checkpoint.get("selected", {})
     adios2 = selected.get("adios2", {}) if isinstance(selected, dict) else {}
     if isinstance(adios2, dict):
@@ -212,14 +211,14 @@ def adios2_uses_kokkos(checkpoint: dict[str, Any]) -> bool | None:
     return None
 
 
-def selected_entry(checkpoint: dict[str, Any], dep: str) -> dict[str, Any]:
+def selected_entry(checkpoint: Dict[str, Any], dep: str) -> Dict[str, Any]:
     selected = checkpoint.get("selected", {})
     if isinstance(selected, dict) and isinstance(selected.get(dep), dict):
         return selected[dep]
     return {}
 
 
-def has_installed_dependency(checkpoint: dict[str, Any], dep: str) -> bool:
+def has_installed_dependency(checkpoint: Dict[str, Any], dep: str) -> bool:
     """Return True when *dep* has a usable entry with existing paths.
 
     This is a structural check; path-existence validation is done
@@ -237,15 +236,262 @@ def has_installed_dependency(checkpoint: dict[str, Any], dep: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Cross-dependency toolchain consistency helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_cmake_config_var(cmake_config_path: Path, var_name: str) -> Optional[str]:
+    """Extract a set() variable value from a CMake config file.
+
+    Looks for patterns like:
+        set(ROCM_PATH "/path/to/rocm")
+        set(CMAKE_CXX_COMPILER "/path/to/compiler")
+    """
+    if not cmake_config_path.is_file():
+        return None
+    try:
+        text = cmake_config_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    # Match: set(VAR_NAME "value") or set(VAR_NAME value)
+    pat = re.compile(
+        rf"^\s*set\s*\(\s*{re.escape(var_name)}\s+(?:\"([^\"]*)\"|(\S+))\s*\)",
+        re.MULTILINE,
+    )
+    m = pat.search(text)
+    if m:
+        return m.group(1) or m.group(2)
+    return None
+
+
+def _cross_check_kokkos_compiler(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    kokkos_entry: Dict[str, Any],
+    compiler: Dict[str, Any],
+) -> None:
+    """Verify Kokkos was built with a compiler ABI-compatible with selected compiler."""
+    kokkos_config = _real_path(
+        kokkos_entry.get("cmake_config")
+    ) or _real_path(
+        str(Path(str(kokkos_entry.get("prefix", ""))) / "lib64" / "cmake" / "Kokkos" / "KokkosConfig.cmake")
+    )
+
+    if kokkos_config is None or not kokkos_config.is_file():
+        add(
+            checks,
+            "cross.kokkos_compiler_consistency",
+            "warn",
+            "Cannot read Kokkos CMake config to verify compiler consistency — unable to check ABI compatibility",
+            {},
+            remediation="Verify manually that Kokkos was built with the same compiler family (GCC/Clang/hipcc) selected for Entity.",
+        )
+        return
+
+    kokkos_cxx = _read_cmake_config_var(kokkos_config, "CMAKE_CXX_COMPILER")
+    if kokkos_cxx is None:
+        add(
+            checks,
+            "cross.kokkos_compiler_consistency",
+            "warn",
+            "Kokkos CMake config found but CMAKE_CXX_COMPILER not recorded — unable to verify compiler ABI consistency",
+            {"kokkos_config": str(kokkos_config)},
+            remediation="Verify manually that Kokkos was built with the same compiler family selected for Entity.",
+        )
+        return
+
+    selected_cxx = str(compiler.get("cxx") or compiler.get("cpp") or "")
+    kokkos_cxx_basename = Path(kokkos_cxx).name
+    selected_cxx_basename = Path(selected_cxx).name if selected_cxx else ""
+
+    # Heuristic: hipcc vs GCC vs Clang
+    kokkos_is_hip = "hipcc" in kokkos_cxx_basename or "nvcc_wrapper" in kokkos_cxx_basename
+    selected_is_hip = "hipcc" in selected_cxx_basename or "nvcc_wrapper" in selected_cxx_basename
+
+    if kokkos_is_hip != selected_is_hip:
+        add(
+            checks,
+            "cross.kokkos_compiler_consistency",
+            "fail",
+            f"Kokkos was built with {kokkos_cxx_basename} but Entity will use {selected_cxx_basename} — likely ABI incompatible",
+            {
+                "kokkos_compiler": kokkos_cxx,
+                "selected_compiler": selected_cxx,
+            },
+            remediation=f"Either rebuild Kokkos with {selected_cxx_basename} or select a compiler matching Kokkos's {kokkos_cxx_basename} toolchain.",
+        )
+        issues.append(
+            f"Kokkos compiler ({kokkos_cxx_basename}) incompatible with selected compiler ({selected_cxx_basename})"
+        )
+    else:
+        add(
+            checks,
+            "cross.kokkos_compiler_consistency",
+            "pass",
+            f"Kokkos and Entity use compatible compiler family ({kokkos_cxx_basename})",
+            {"kokkos_compiler": kokkos_cxx, "selected_compiler": selected_cxx},
+        )
+
+
+def _cross_check_gpu_toolkit_consistency(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    kokkos_entry: Dict[str, Any],
+    gpu_toolkit: Dict[str, Any],
+    backend: str,
+) -> None:
+    """Verify GPU toolkit version used to build Kokkos matches selected toolkit."""
+    if backend not in ("hip", "cuda"):
+        return
+
+    kokkos_config = _real_path(
+        kokkos_entry.get("cmake_config")
+    ) or _real_path(
+        str(Path(str(kokkos_entry.get("prefix", ""))) / "lib64" / "cmake" / "Kokkos" / "KokkosConfig.cmake")
+    )
+
+    if kokkos_config is None or not kokkos_config.is_file():
+        return
+
+    gpu_prefix = str(gpu_toolkit.get("prefix") or "")
+
+    if backend == "hip":
+        # Compare ROCM_PATH recorded in Kokkos config with selected gpu_toolkit
+        kokkos_rocm = _read_cmake_config_var(kokkos_config, "ROCM_PATH")
+        if kokkos_rocm and gpu_prefix:
+            kokkos_rocm_path = Path(kokkos_rocm).resolve()
+            gpu_prefix_path = Path(gpu_prefix).resolve()
+            if kokkos_rocm_path != gpu_prefix_path:
+                add(
+                    checks,
+                    "cross.gpu_toolkit_consistency",
+                    "fail",
+                    f"Kokkos was built with ROCM_PATH={kokkos_rocm} but selected gpu_toolkit prefix is {gpu_prefix} — DTK version mismatch will cause link errors",
+                    {
+                        "kokkos_rocm_path": str(kokkos_rocm_path),
+                        "gpu_toolkit_prefix": str(gpu_prefix_path),
+                    },
+                    remediation=f"Either select gpu_toolkit at {kokkos_rocm} to match Kokkos, or rebuild Kokkos with the selected toolkit.",
+                )
+                issues.append(
+                    f"Kokkos DTK/ROCm version ({kokkos_rocm}) differs from selected gpu_toolkit ({gpu_prefix})"
+                )
+            else:
+                add(
+                    checks,
+                    "cross.gpu_toolkit_consistency",
+                    "pass",
+                    "Kokkos and selected gpu_toolkit use the same ROCm/DTK installation",
+                    {"rocm_path": kokkos_rocm},
+                )
+        elif kokkos_rocm and not gpu_prefix:
+            add(
+                checks,
+                "cross.gpu_toolkit_consistency",
+                "warn",
+                f"Kokkos expects ROCM_PATH={kokkos_rocm} but no gpu_toolkit is explicitly selected — ensure {kokkos_rocm} is available",
+                {"kokkos_rocm_path": kokkos_rocm},
+                remediation="Add gpu_toolkit entry to entity-deps.local.json with the matching ROCm prefix.",
+            )
+
+
+def _cross_check_mpi_consistency(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    mpi_entry: Dict[str, Any],
+    adios2_entry: Dict[str, Any],
+    hdf5_entry: Dict[str, Any],
+    env: Dict[str, Any],
+) -> None:
+    """Check that MPI implementation is consistent across ADIOS2 and HDF5."""
+    if not isinstance(env, dict) or not env.get("mpi"):
+        return
+
+    mpi_prefix = str(mpi_entry.get("prefix") or "")
+    if not mpi_prefix:
+        return
+
+    mpi_lib = Path(mpi_prefix) / "lib" / "libmpi.so"
+    if not mpi_lib.exists():
+        mpi_lib = Path(mpi_prefix) / "lib64" / "libmpi.so"
+
+    mpi_real = ""
+    try:
+        mpi_real = str(mpi_lib.resolve())
+    except OSError:
+        pass
+
+    # Check each output dependency's MPI linkage via cmake config records
+    for dep_name, dep_entry in (("adios2", adios2_entry), ("hdf5", hdf5_entry)):
+        if not dep_entry:
+            continue
+        dep_mpi = str(dep_entry.get("mpi_provider") or dep_entry.get("mpi_prefix") or "")
+        if dep_mpi and dep_mpi != mpi_prefix and str(Path(dep_mpi).resolve()) != mpi_real:
+            add(
+                checks,
+                f"cross.mpi_{dep_name}_consistency",
+                "fail",
+                f"{dep_name} was built with MPI at {dep_mpi} but selected MPI is at {mpi_prefix} — may cause symbol conflicts",
+                {
+                    "mpi_selected": mpi_prefix,
+                    f"{dep_name}_mpi": dep_mpi,
+                },
+                remediation=f"Rebuild {dep_name} with the selected MPI, or select the MPI that {dep_name} was built with.",
+            )
+            issues.append(f"{dep_name} MPI mismatch with selected MPI")
+
+
+def run_cross_checks(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    req: Dict[str, Any],
+    checkpoint: Dict[str, Any],
+) -> None:
+    """Run cross-dependency toolchain consistency checks.
+
+    Validates that the selected dependencies form a compatible set:
+    - Kokkos compiler ABI matches the selected compiler
+    - GPU toolkit (DTK/ROCm or CUDA) version matches what Kokkos was built with
+    - MPI implementation is consistent across ADIOS2, HDF5, and the selected MPI
+    """
+    selected = checkpoint.get("selected", {})
+    if not isinstance(selected, dict):
+        return
+
+    kokkos = selected.get("kokkos", {})
+    compiler = selected.get("compiler", {})
+    gpu_toolkit = selected.get("gpu_toolkit", {})
+    mpi_entry = selected.get("mpi", {})
+    adios2_entry = selected.get("adios2", {})
+    hdf5_entry = selected.get("hdf5", {})
+
+    env = req.get("environment", {})
+    backend = str(env.get("backend") or "cpu").lower() if isinstance(env, dict) else "cpu"
+
+    if isinstance(kokkos, dict) and kokkos:
+        if isinstance(compiler, dict) and compiler:
+            _cross_check_kokkos_compiler(checks, issues, kokkos, compiler)
+
+        if backend in ("hip", "cuda") and isinstance(gpu_toolkit, dict) and gpu_toolkit:
+            _cross_check_gpu_toolkit_consistency(checks, issues, kokkos, gpu_toolkit, backend)
+
+    if isinstance(mpi_entry, dict) and mpi_entry:
+        _cross_check_mpi_consistency(
+            checks, issues, mpi_entry, adios2_entry, hdf5_entry, env,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main check runner
 # ---------------------------------------------------------------------------
 
 
 def run_checks(
-    req: dict[str, Any], checkpoint: dict[str, Any]
-) -> tuple[str, list[dict[str, Any]], list[str]]:
-    checks: list[dict[str, Any]] = []
-    issues: list[str] = []
+    req: Dict[str, Any], checkpoint: Dict[str, Any]
+) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+    checks: List[Dict[str, Any]] = []
+    issues: List[str] = []
 
     # -- Section 1: Request / checkpoint consistency ------------------------
     # (ref: compatibility-check.md section 1)
@@ -503,6 +749,11 @@ def run_checks(
     # (ref: compatibility-check.md section 7)
     # MPI consistency across ADIOS2 and HDF5 is checked implicitly above;
     # per-package checks (ADIOS2_USE_Kokkos vs CUDA) are in Section 4.
+
+    # -- Section 8: Cross-dependency toolchain consistency -------------------
+    # Verify that the selected dependencies form a compatible set:
+    # Kokkos compiler ABI, GPU toolkit version, MPI implementation consistency.
+    run_cross_checks(checks, issues, req, checkpoint)
 
     # -- Section 9: Source-build script readiness ---------------------------
     # (ref: compatibility-check.md section 9)

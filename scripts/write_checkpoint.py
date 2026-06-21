@@ -5,8 +5,6 @@ This formalizes the checkpoint-creation step that was previously done by
 hand-written scripts during the initial practice run.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -15,12 +13,12 @@ import socket
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from _version_profile import version_profile as detect_version_profile
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -28,7 +26,7 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, delete=False
@@ -43,7 +41,7 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def detect_target() -> dict[str, Any]:
+def detect_target() -> Dict[str, Any]:
     return {
         "hostname": socket.gethostname(),
         "os": platform.system(),
@@ -53,11 +51,11 @@ def detect_target() -> dict[str, Any]:
     }
 
 
-def derive_paths(selected: dict[str, Any]) -> dict[str, Any]:
+def derive_paths(selected: Dict[str, Any]) -> Dict[str, Any]:
     """Derive PATH / CMAKE_PREFIX_PATH / LD_LIBRARY_PATH from selected entries."""
-    path_entries: list[str] = []
-    cmake_entries: list[str] = []
-    ld_entries: list[str] = []
+    path_entries: List[str] = []
+    cmake_entries: List[str] = []
+    ld_entries: List[str] = []
 
     for dep_name, entry in selected.items():
         if not isinstance(entry, dict):
@@ -102,10 +100,10 @@ def derive_paths(selected: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_checkpoint(
-    req: dict[str, Any],
-    discovery: dict[str, Any] | None = None,
-    merge_from: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    req: Dict[str, Any],
+    discovery: Optional[Dict[str, Any]] = None,
+    merge_from: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     entity = req.get("entity", {})
     workdir = str(entity.get("workdir", "")) if isinstance(entity, dict) else ""
@@ -116,7 +114,7 @@ def build_checkpoint(
         raise SystemExit("ENTITY_WORKDIR must be set or present in requirements.entity.workdir")
 
     # Build selected dependencies from discovery data
-    selected: dict[str, Any] = {}
+    selected: Dict[str, Any] = {}
     if discovery and isinstance(discovery, dict):
         for dep, entry in discovery.items():
             if isinstance(entry, dict):
@@ -143,7 +141,7 @@ def build_checkpoint(
     except (ValueError, SystemExit):
         profile = {"name": "unknown", "cxx_standard": "17"}
 
-    checkpoint: dict[str, Any] = {
+    checkpoint: Dict[str, Any] = {
         "schema_version": 1,
         "generated_at": now,
         "requirements": {

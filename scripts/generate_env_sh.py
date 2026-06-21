@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Generate env.sh from entity-deps.local.json."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -10,10 +8,10 @@ import shlex
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -21,7 +19,7 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
         f.write(text)
@@ -29,8 +27,8 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def unique(values: list[str]) -> list[str]:
-    out: list[str] = []
+def unique(values: List[str]) -> List[str]:
+    out: List[str] = []
     seen: set[str] = set()
     for value in values:
         if not value:
@@ -43,8 +41,8 @@ def unique(values: list[str]) -> list[str]:
     return out
 
 
-def dep_prefixes(selected: dict[str, Any]) -> list[str]:
-    prefixes: list[str] = []
+def dep_prefixes(selected: Dict[str, Any]) -> List[str]:
+    prefixes: List[str] = []
     for dep in selected.values():
         if isinstance(dep, dict):
             prefix = dep.get("prefix") or dep.get("install_prefix")
@@ -53,26 +51,38 @@ def dep_prefixes(selected: dict[str, Any]) -> list[str]:
     return unique(prefixes)
 
 
-def dep_bins(selected: dict[str, Any]) -> list[str]:
-    bins: list[str] = []
+def dep_bins(selected: Dict[str, Any]) -> List[str]:
+    bins: List[str] = []
     for dep in selected.values():
         if isinstance(dep, dict):
             bin_path = dep.get("bin")
             if bin_path:
-                bins.append(str(bin_path))
+                p = Path(str(bin_path))
+                # If bin points to a file (e.g. /path/to/cmake executable),
+                # use its parent directory — PATH entries must be directories.
+                if p.is_file():
+                    bins.append(str(p.parent))
+                else:
+                    bins.append(str(p))
             prefix = dep.get("prefix") or dep.get("install_prefix")
             if prefix:
                 bins.append(str(Path(str(prefix)) / "bin"))
     return unique(bins)
 
 
-def dep_libs(selected: dict[str, Any]) -> list[str]:
-    libs: list[str] = []
+def dep_libs(selected: Dict[str, Any]) -> List[str]:
+    libs: List[str] = []
     for dep in selected.values():
         if isinstance(dep, dict):
             lib_path = dep.get("lib")
             if lib_path:
-                libs.append(str(lib_path))
+                p = Path(str(lib_path))
+                # If lib points to a file (e.g. a specific .so),
+                # use its parent directory — LD_LIBRARY_PATH entries must be directories.
+                if p.is_file():
+                    libs.append(str(p.parent))
+                else:
+                    libs.append(str(p))
             prefix = dep.get("prefix") or dep.get("install_prefix")
             if prefix:
                 libs.append(str(Path(str(prefix)) / "lib"))
@@ -80,7 +90,7 @@ def dep_libs(selected: dict[str, Any]) -> list[str]:
     return unique(libs)
 
 
-def selected_compiler(selected: dict[str, Any]) -> tuple[str, str, str]:
+def selected_compiler(selected: Dict[str, Any]) -> Tuple[str, str, str]:
     compiler = selected.get("compiler", {})
     kokkos = selected.get("kokkos", {})
     mpi = selected.get("mpi", {})
@@ -105,7 +115,7 @@ def shell_export(name: str, value: str) -> str:
     return f"export {name}={shlex.quote(value)}"
 
 
-def shell_path_export(name: str, values: list[str]) -> str:
+def shell_path_export(name: str, values: List[str]) -> str:
     values = unique(values)
     if not values:
         return f"# {name}: no entries generated"
@@ -113,7 +123,7 @@ def shell_path_export(name: str, values: list[str]) -> str:
     return f"export {name}={shlex.quote(joined)}${{{name}:+:${name}}}"
 
 
-def require_compatibility_pass(data: dict[str, Any], allow_incomplete: bool) -> None:
+def require_compatibility_pass(data: Dict[str, Any], allow_incomplete: bool) -> None:
     if allow_incomplete:
         return
     compatibility = data.get("compatibility", {})
@@ -127,7 +137,7 @@ def require_compatibility_pass(data: dict[str, Any], allow_incomplete: bool) -> 
         )
 
 
-def generate_env(data: dict[str, Any], json_path: Path) -> str:
+def generate_env(data: Dict[str, Any], json_path: Path) -> str:
     selected = data.get("selected", {})
     if not isinstance(selected, dict):
         selected = {}
@@ -199,7 +209,7 @@ def generate_env(data: dict[str, Any], json_path: Path) -> str:
     return "\n".join(lines)
 
 
-def default_output_path(data: dict[str, Any], json_path: Path) -> Path:
+def default_output_path(data: Dict[str, Any], json_path: Path) -> Path:
     env_sh = data.get("env_sh", {})
     if isinstance(env_sh, dict) and env_sh.get("path"):
         return Path(str(env_sh["path"]))

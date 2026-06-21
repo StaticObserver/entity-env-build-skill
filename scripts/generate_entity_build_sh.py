@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Generate entity-build.sh from requirements.json and env.sh."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -11,12 +9,12 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from _version_profile import inferred_cxx_standard
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -24,7 +22,7 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
         f.write(text)
@@ -40,7 +38,7 @@ def bool_on(value: Any) -> str:
     return "ON" if bool(value) else "OFF"
 
 
-def _verify_checkpoint_gate(checkpoint: dict[str, Any], env_sh: Path) -> None:
+def _verify_checkpoint_gate(checkpoint: Dict[str, Any], env_sh: Path) -> None:
     """Verify compatibility and env.sh are consistent before allowing build script generation."""
     compat = checkpoint.get("compatibility", {})
     if not isinstance(compat, dict):
@@ -71,7 +69,7 @@ def _verify_checkpoint_gate(checkpoint: dict[str, Any], env_sh: Path) -> None:
         )
 
 
-def require_string(obj: dict[str, Any], path: str) -> str:
+def require_string(obj: Dict[str, Any], path: str) -> str:
     cur: Any = obj
     for part in path.split("."):
         if not isinstance(cur, dict) or part not in cur:
@@ -82,7 +80,7 @@ def require_string(obj: dict[str, Any], path: str) -> str:
     return str(cur)
 
 
-def default_build_dir(req: dict[str, Any]) -> str:
+def default_build_dir(req: Dict[str, Any]) -> str:
     compile_cfg = req.get("compile", {})
     env = req.get("environment", {})
     entity = req.get("entity", {})
@@ -105,7 +103,7 @@ def default_build_dir(req: dict[str, Any]) -> str:
     return str(Path(workdir) / "build" / safe)
 
 
-def cmake_options(req: dict[str, Any], selected: dict[str, Any] | None = None) -> list[str]:
+def cmake_options(req: Dict[str, Any], selected: Optional[Dict[str, Any]] = None) -> List[str]:
     env = req.get("environment", {})
     compile_cfg = req.get("compile", {})
     pgen = compile_cfg.get("pgen")
@@ -130,13 +128,16 @@ def cmake_options(req: dict[str, Any], selected: dict[str, Any] | None = None) -
             pgens = ",".join(str(item) for item in pgens)
         opts.insert(0, f"-Dpgens={pgens}")
 
-    # Explicit compiler selection from checkpoint (reference env vars, not paths)
+    # Explicit compiler selection from checkpoint (reference env vars, not paths).
+    # These flags must NOT go through shlex.quote because $CXX/$CC need shell expansion.
+    # They are returned separately as raw_shell_opts.
+    raw_shell_opts: List[str] = []
     if selected and isinstance(selected, dict):
         compiler = selected.get("compiler", {})
         if isinstance(compiler, dict) and compiler.get("cxx"):
-            opts.insert(0, '-DCMAKE_CXX_COMPILER="$CXX"')
+            raw_shell_opts.append('-DCMAKE_CXX_COMPILER="${CXX}"')
         if isinstance(compiler, dict) and compiler.get("cc"):
-            opts.insert(0, '-DCMAKE_C_COMPILER="$CC"')
+            raw_shell_opts.append('-DCMAKE_C_COMPILER="${CC}"')
 
     # Compiler flags (e.g. -O1 workaround for Clang PHI node bug)
     cmake_cxx_flags = compile_cfg.get("cmake_cxx_flags", "")
@@ -161,14 +162,14 @@ def cmake_options(req: dict[str, Any], selected: dict[str, Any] | None = None) -
         opts.append(f"-DCMAKE_INSTALL_PREFIX={install_prefix}")
     for extra in compile_cfg.get("extra_cmake_options") or []:
         opts.append(str(extra))
-    return opts
+    return opts, raw_shell_opts
 
 
-def shell_command(parts: list[str]) -> str:
+def shell_command(parts: List[str]) -> str:
     return " ".join(q(part) for part in parts)
 
 
-def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path, selected: dict[str, Any] | None = None) -> tuple[str, dict[str, str]]:
+def generate_script(req: Dict[str, Any], req_path: Path, env_sh: Path, selected: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, str]]:
     checkout = require_string(req, "entity.checkout_root")
     workdir = require_string(req, "entity.workdir")
     compile_cfg = req.setdefault("compile", {})
@@ -177,7 +178,12 @@ def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path, selected:
     compile_cfg["cxx_standard"] = inferred_cxx_standard(req)
     jobs = str(compile_cfg.get("jobs") or "")
 
-    configure_parts = ["cmake", "-B", build_dir, *cmake_options(req, selected)]
+    fixed_opts, raw_shell_opts = cmake_options(req, selected)
+    # Build configure command: fixed parts are quoted, raw_shell_opts need
+    # shell expansion (e.g. $CXX) so they are appended unquoted.
+    configure_cmd = shell_command(["cmake", "-B", build_dir, *fixed_opts])
+    if raw_shell_opts:
+        configure_cmd += " " + " ".join(raw_shell_opts)
     build_parts = ["cmake", "--build", build_dir]
     if jobs:
         build_parts.extend(["-j", jobs])
@@ -189,7 +195,7 @@ def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path, selected:
         f"source {q(env_sh.resolve())}",
         f"mkdir -p {q(Path(workdir) / 'logs')}",
         f"cd {q(checkout)}",
-        shell_command(configure_parts),
+        configure_cmd,
         shell_command(build_parts),
     ]
     if compile_cfg.get("tests"):
@@ -198,7 +204,7 @@ def generate_script(req: dict[str, Any], req_path: Path, env_sh: Path, selected:
         lines.append(shell_command(["cmake", "--install", build_dir]))
     lines.append("")
     meta = {
-        "configure_command": shell_command(configure_parts),
+        "configure_command": configure_cmd,
         "build_command": shell_command(build_parts),
         "expected_executable": str(Path(checkout) / build_dir / "src" / "entity.xc"),
     }

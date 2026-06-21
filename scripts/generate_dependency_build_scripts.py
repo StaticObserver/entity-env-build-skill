@@ -6,8 +6,6 @@ ENTITY_CHECKOUT stays clean, while generated scripts, logs, source trees,
 build trees, and install prefixes live under ENTITY_WORKDIR by default.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -15,7 +13,7 @@ import shlex
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from _version_profile import (
     DEFAULT_HDF5_VERSION,
@@ -25,7 +23,7 @@ from _version_profile import (
 )
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -33,7 +31,7 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as f:
         f.write(text)
@@ -50,7 +48,7 @@ DEFAULT_VERSION_PROFILES = _DEFAULT_VERSION_PROFILES
 entity_version_profile = version_profile
 
 
-def get_workdir(req: dict[str, Any]) -> Path:
+def get_workdir(req: Dict[str, Any]) -> Path:
     entity = req.get("entity", {})
     if isinstance(entity, dict) and entity.get("workdir"):
         return Path(str(entity["workdir"]))
@@ -60,7 +58,7 @@ def get_workdir(req: dict[str, Any]) -> Path:
     raise SystemExit("requirements.json missing entity.workdir and ENTITY_WORKDIR is unset")
 
 
-def dep_list(value: str | None, req: dict[str, Any]) -> list[str]:
+def dep_list(value: Optional[str], req: Dict[str, Any]) -> List[str]:
     if value:
         deps = [item.strip().lower() for item in value.split(",") if item.strip()]
         unknown = [dep for dep in deps if dep not in {"kokkos", "hdf5", "adios2", "mpi"}]
@@ -76,7 +74,7 @@ def dep_list(value: str | None, req: dict[str, Any]) -> list[str]:
     return deps
 
 
-def compiler_env(checkpoint: dict[str, Any]) -> dict[str, str]:
+def compiler_env(checkpoint: Dict[str, Any]) -> Dict[str, str]:
     selected = checkpoint.get("selected", {})
     compiler = selected.get("compiler", {}) if isinstance(selected, dict) else {}
     mpi = selected.get("mpi", {}) if isinstance(selected, dict) else {}
@@ -91,7 +89,7 @@ def compiler_env(checkpoint: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def script_header(name: str, workdir: Path, prefix: Path, compilers: dict[str, str]) -> str:
+def script_header(name: str, workdir: Path, prefix: Path, compilers: Dict[str, str]) -> str:
     lines = [
         "#!/usr/bin/env bash",
         f"# Generated dependency build script for {name}. Review before execution.",
@@ -118,7 +116,7 @@ def script_header(name: str, workdir: Path, prefix: Path, compilers: dict[str, s
     return "\n".join(lines)
 
 
-def kokkos_script(req: dict[str, Any], checkpoint: dict[str, Any], workdir: Path) -> str:
+def kokkos_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     prefix = workdir / "deps" / "kokkos"
@@ -167,7 +165,7 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/kokkos-install.log"
     )
 
 
-def hdf5_script(req: dict[str, Any], checkpoint: dict[str, Any], workdir: Path) -> str:
+def hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     prefix = workdir / "deps" / "hdf5"
@@ -193,7 +191,7 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/hdf5-install.log"
     )
 
 
-def adios2_script(req: dict[str, Any], checkpoint: dict[str, Any], workdir: Path) -> str:
+def adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     prefix = workdir / "deps" / "adios2"
@@ -242,7 +240,7 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/adios2-install.log"
     )
 
 
-def mpi_script(req: dict[str, Any], checkpoint: dict[str, Any], workdir: Path) -> str:
+def mpi_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     compilers = compiler_env(checkpoint)
     prefix = workdir / "deps" / "openmpi"
     return (
@@ -280,7 +278,7 @@ def main() -> None:
     workdir = get_workdir(req)
     out_dir = args.output_dir or workdir / "generated" / "source-build-scripts"
     out_dir.mkdir(parents=True, exist_ok=True)
-    scripts: dict[str, dict[str, str]] = {}
+    scripts: Dict[str, Dict[str, str]] = {}
     profile = entity_version_profile(req)
     for dep in dep_list(args.deps, req):
         text = SCRIPT_FACTORIES[dep](req, checkpoint, workdir)

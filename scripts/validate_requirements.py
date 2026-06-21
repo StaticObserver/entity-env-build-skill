@@ -4,13 +4,11 @@
 When completeness is confirmed the script exits 0; otherwise 1.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 from _version_profile import profile_for
 
@@ -58,7 +56,7 @@ CONSISTENCY_RULES = [
 ]
 
 
-def _get(obj: dict[str, Any], dotted: str) -> Any:
+def _get(obj: Dict[str, Any], dotted: str) -> Any:
     """Drill into *obj* using dotted path. Returns None when any key is missing."""
     cur: Any = obj
     for part in dotted.split("."):
@@ -69,7 +67,7 @@ def _get(obj: dict[str, Any], dotted: str) -> Any:
     return cur
 
 
-def _has(obj: dict[str, Any], dotted: str) -> bool:
+def _has(obj: Dict[str, Any], dotted: str) -> bool:
     val = _get(obj, dotted)
     if val is None:
         return False
@@ -79,17 +77,17 @@ def _has(obj: dict[str, Any], dotted: str) -> bool:
 
 
 def check_required(
-    req: dict[str, Any], fields: list[str], phase: str
-) -> list[dict[str, str]]:
-    missing: list[dict[str, str]] = []
+    req: Dict[str, Any], fields: List[str], phase: str
+) -> List[Dict[str, str]]:
+    missing: List[Dict[str, str]] = []
     for path in fields:
         if not _has(req, path):
             missing.append({"field": path, "phase": phase})
     return missing
 
 
-def check_consistency(req: dict[str, Any]) -> list[dict[str, str]]:
-    issues: list[dict[str, str]] = []
+def check_consistency(req: Dict[str, Any]) -> List[Dict[str, str]]:
+    issues: List[Dict[str, str]] = []
     for rule_id, condition, pair, msg in CONSISTENCY_RULES:
         if condition:
             cond_field, cond_val = condition
@@ -123,7 +121,7 @@ def check_consistency(req: dict[str, Any]) -> list[dict[str, str]]:
     return issues
 
 
-def run_validation(req: dict[str, Any]) -> dict[str, Any]:
+def run_validation(req: Dict[str, Any]) -> Dict[str, Any]:
     always_missing = check_required(req, REQUIRED_ALWAYS, "always")
     build_missing = check_required(req, REQUIRED_BUILD, "build")
     missing_fields = always_missing + build_missing
