@@ -110,7 +110,7 @@ Completion rules:
 
 - `entity.checkout_root` is required before generating `entity-build.sh`.
 - `entity.workdir` is required before writing artifacts.
-- `entity.dependency_profile` is derived from the Entity version unless explicitly set. Use `legacy` for Entity `1.4.x` and older, and `modern` for Entity newer than `1.4.x`.
+- `entity.dependency_profile` is derived from the Entity version unless explicitly set. Use `legacy` for Entity versions before `1.4.0`, and `modern` for `1.4.0` and newer.
 - `compile.cxx_standard` must be `17` for `legacy` and `20` for `modern`.
 - `environment.dependency_versions` may pin exact source-build tags. If omitted, generated source-build scripts must choose and record profile-compatible concrete tags; for `legacy`, Kokkos must be explicitly pinned to a Kokkos 4.x tag.
 - `compile.pgen` or `compile.pgens` is required before generating `entity-build.sh`. Use one, not both.

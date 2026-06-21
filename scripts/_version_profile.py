@@ -39,7 +39,7 @@ def detect_profile_name(req: Dict[str, Any]) -> str:
         else:
             break
 
-    if len(digits) >= 2 and (digits[0], digits[1]) <= (1, 4):
+    if len(digits) >= 2 and (digits[0], digits[1]) < (1, 4):
         return "legacy"
     return "modern"
 
@@ -80,7 +80,7 @@ def inferred_cxx_standard(req: Dict[str, Any]) -> str:
                 digits.append(int(part))
             else:
                 break
-        if len(digits) >= 2 and (digits[0], digits[1]) <= (1, 4):
+        if len(digits) >= 2 and (digits[0], digits[1]) < (1, 4):
             return "17"
         if len(digits) >= 2:
             return "20"

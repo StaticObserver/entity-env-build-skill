@@ -13,8 +13,8 @@
 - 默认复用本地/system 依赖，不使用 Spack 或 Docker，除非用户明确要求。
 - 所有依赖默认使用一致的编译器/toolchain。
 - CUDA 后端使用 Kokkos `nvcc_wrapper`。
-- Entity `1.4.x` 及更早版本使用 `C++17 + Kokkos 4.x + ADIOS2 2.10.x`。
-- Entity 新于 `1.4.x` 的版本使用 `C++20 + Kokkos 5.x + ADIOS2 2.11.x`。
+- Entity `1.4.0` 之前版本使用 `C++17 + Kokkos 4.x + ADIOS2 2.10.x`。
+- Entity `1.4.0` 及更新版本使用 `C++20 + Kokkos 5.x + ADIOS2 2.11.x`。
 - 只有 `Kokkos 5.x + ADIOS2 2.11.x` profile 启用 ADIOS2 Kokkos 支持。
 - `env.sh` 只能在 compatibility check 通过后生成。
 
@@ -70,8 +70,8 @@ Core constraints:
 - Reuse local/system dependencies by default; do not use Spack or Docker unless explicitly requested.
 - Keep all dependencies on one consistent compiler/toolchain unless the user accepts the risk.
 - CUDA builds use Kokkos `nvcc_wrapper`.
-- Entity `1.4.x` and older use `C++17 + Kokkos 4.x + ADIOS2 2.10.x`.
-- Entity versions newer than `1.4.x` use `C++20 + Kokkos 5.x + ADIOS2 2.11.x`.
+- Entity versions before `1.4.0` use `C++17 + Kokkos 4.x + ADIOS2 2.10.x`.
+- Entity `1.4.0` and newer use `C++20 + Kokkos 5.x + ADIOS2 2.11.x`.
 - Enable ADIOS2 Kokkos support only for the `Kokkos 5.x + ADIOS2 2.11.x` profile.
 - Generate `env.sh` only after compatibility checks pass.
 

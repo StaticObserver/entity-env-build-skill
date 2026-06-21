@@ -34,7 +34,7 @@ Boolean CMake options use `ON` or `OFF`.
 | `gpu_aware_mpi` | Enable GPU-aware MPI communications | `ON`, `OFF` | `ON` | Added in Entity 1.2.0. In this skill, keep the conservative environment default `OFF` unless confirmed. |
 | `DEBUG` | Enable debug mode | `ON`, `OFF` | `OFF` | Use for debug builds. |
 | `TESTS` | Compile unit tests | `ON`, `OFF` | `OFF` | Required before running `ctest`. |
-| `CMAKE_CXX_STANDARD` | C++ language standard | `17`, `20` | profile-derived | Use `20` for Entity newer than `1.4.x`; use `17` for Entity `1.4.x` and older. |
+| `CMAKE_CXX_STANDARD` | C++ language standard | `17`, `20` | profile-derived | Use `20` for Entity `1.4.0` and newer; use `17` for versions before `1.4.0`. |
 
 ## Entity Version Profiles
 
@@ -42,8 +42,8 @@ The Entity version determines the default C++ standard and dependency family:
 
 | Entity version | Profile | C++ standard | Kokkos | ADIOS2 | ADIOS2 Kokkos support |
 | --- | --- | --- | --- | --- | --- |
-| `1.4.x` and older | `legacy` | `17` | `4.x` | `2.10.x` | `OFF` |
-| newer than `1.4.x` | `modern` | `20` | `5.x` | `2.11.x` | `ON` |
+| before `1.4.0` | `legacy` | `17` | `4.x` | `2.10.x` | `OFF` |
+| `1.4.0` and newer | `modern` | `20` | `5.x` | `2.11.x` | `ON` |
 
 Exact source-build tags may be pinned in `requirements.environment.dependency_versions`, but they must remain inside the profile's version family unless the user explicitly accepts an override.
 

@@ -56,7 +56,7 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 - Use `MPI` only when the current request requires parallel/multi-process or multi-node builds.
 - Use output support by default. When `requirements.environment.output=true`, require `ADIOS2 + HDF5`.
 - Unless the user explicitly accepts the risk, all dependencies must use one consistent, non-conflicting compiler/toolchain.
-- Entity versions newer than `1.4.x` require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; Entity `1.4.x` and older use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`.
+- Entity `1.4.0` and newer require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; versions before `1.4.0` use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`.
 - Only the `Kokkos 5.x + ADIOS2 2.11.x` profile builds ADIOS2 with Kokkos support. Other profiles must not add Kokkos as an ADIOS2 dependency unless the user explicitly overrides the profile.
 - For CUDA backend builds, use Kokkos `nvcc_wrapper` as the C++ compiler, usually from `Kokkos source/install prefix/bin/nvcc_wrapper`. Record both wrapper path and host compiler.
 - For source builds, generate local scripts with `scripts/entity_generate.py deps`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
@@ -213,7 +213,7 @@ After collecting all answers, write `requirements.json` following the schema in 
 
 Defaults that don't need asking unless the user overrides:
 
-- `entity.dependency_profile`: derived from Entity version — `legacy` for ≤1.4.x, `modern` for >1.4.x
+- `entity.dependency_profile`: derived from Entity version — `legacy` for <1.4.0, `modern` for ≥1.4.0
 - `compile.cxx_standard`: derived from profile — `17` for legacy, `20` for modern
 - `environment.dependency_versions`: leave empty; fill after probing if source builds are needed
 
