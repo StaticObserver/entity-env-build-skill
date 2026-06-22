@@ -37,7 +37,7 @@ Only `status=pass` may continue to `env.sh` generation.
 
 ## 1. Request And Checkpoint Consistency
 
-> **Implementation status: Partial** — `entity_compat.py` checks `ENTITY_CHECKOUT`/`ENTITY_WORKDIR` mismatch and `requirements.path` existence. Schema version and detailed field-by-field match are not yet automated.
+> **Implementation status: Mostly implemented** — `entity_compat.py` checks schema version, `ENTITY_CHECKOUT`/`ENTITY_WORKDIR` mismatch, `requirements.path` existence, and the reusable `requirements.embedded` snapshot for backend, MPI, output, profile, and compile-option drift.
 
 Check:
 

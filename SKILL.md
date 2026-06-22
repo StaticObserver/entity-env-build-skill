@@ -426,7 +426,20 @@ Pass to the sub-agent:
 
 **Step 3: Sub-agent returns → main agent updates checkpoint**
 
-After sub-agent returns successfully, update `selected.<dep>` in entity-deps.local.json with prefix, cmake_config, version, compiler_signature, and validation evidence. Re-run compatibility check before proceeding to the next dependency.
+After sub-agent returns successfully, record install evidence through the checkpoint tool. Do not hand-edit `selected.<dep>`:
+
+```bash
+python3 scripts/entity_checkpoint.py record-install \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --dep <dep> \
+  --prefix <installed-prefix> \
+  --cmake-config <Config.cmake-path> \
+  --version <version> \
+  --compiler-signature <compiler-signature> \
+  --log <install-log>
+```
+
+The command validates recorded paths, updates `selected.<dep>`, marks compatibility `unknown`, and forces a fresh compatibility check before proceeding to the next dependency.
 
 **Step 4: Repeat for next dependency**
 
@@ -479,7 +492,7 @@ Only `status=pass` allows `env.sh` generation.
 
 #### 3a. Generate env.sh From JSON
 
-After compatibility passes, generate a local environment loader. The generator refuses unless `compatibility.status=pass`.
+After compatibility passes, generate a local environment loader. The generator refuses unless `compatibility.status=pass`. Warning-only compatibility results are blocking by default; use `--allow-warnings` only when `decisions.compatibility_warnings_accepted` records an explicit user-confirmed risk acceptance.
 
 ```bash
 python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
@@ -505,17 +518,21 @@ python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --run-id "$RUN_ID"
 ```
 
-`--checkpoint` enables gate validation: the generator verifies compatibility is `pass` and env.sh matches the checkpoint. Omit `--checkpoint` only for debugging.
+`--checkpoint` enables gate validation: the generator verifies compatibility is `pass` and `env.sh` matches the checkpoint. Omit `--checkpoint` only for debugging. A mismatched `env.sh` is treated as stale and blocks generation unless `--allow-stale-env` is explicitly used for debugging.
 
 The generated script sources `env.sh`, runs `cmake -B` configure then `cmake --build`, respects all `requirements.compile` options, and fails fast with `set -euo pipefail`.
 
-Then execute (directly or via SLURM/PBS if on a cluster):
+Then execute through the lightweight runner, which records `build_result` back to `requirements.json`:
 
 ```bash
-bash entity-build.sh
+python3 scripts/entity_run.py build "$ENTITY_WORKDIR/requirements.json" \
+  --script "$ENTITY_WORKDIR/entity-build.sh" \
+  --run-id "$RUN_ID"
 ```
 
-Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_script.generated_from`, and execution result back to `requirements.json` or a build result section referenced by it.
+Direct `bash entity-build.sh` is a debugging fallback only. For cluster scheduler execution, submit the generated script through the scheduler, then record the result with the runner or update `build_result` from scheduler logs.
+
+Record `entity_build_script.path`, `entity_build_script.status`, `entity_build_script.generated_from`, and execution result back to `requirements.json`.
 
 ##### Build Failure Diagnosis
 

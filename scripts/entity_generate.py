@@ -38,6 +38,7 @@ from entity_schema import (
     KOKKOS_BACKEND_FLAGS,
     SOURCE_BUILD_DEPENDENCIES,
     OPTIONAL_SOURCE_DEPENDENCIES,
+    override_satisfies,
 )
 
 
@@ -528,18 +529,35 @@ def dep_libs(selected: Dict[str, Any]) -> List[str]:
     return unique(libs)
 
 
-_NON_BLOCKING_STATUSES = {"pass", "warn"}
+def _warnings_accepted(data: Dict[str, Any]) -> bool:
+    decisions = data.get("decisions", {})
+    if not isinstance(decisions, dict):
+        return False
+    return override_satisfies(decisions.get("compatibility_warnings_accepted"))
 
-def require_compatibility_pass(data: Dict[str, Any], allow_incomplete: bool) -> None:
+
+def require_compatibility_pass(
+    data: Dict[str, Any],
+    allow_incomplete: bool,
+    allow_warnings: bool = False,
+) -> None:
     if allow_incomplete:
         return
     compatibility = data.get("compatibility", {})
     status = str(compatibility.get("status") or "") if isinstance(compatibility, dict) else ""
-    if status not in _NON_BLOCKING_STATUSES:
+    if status == "pass":
+        return
+    if status == "warn" and allow_warnings and _warnings_accepted(data):
+        return
+    if status == "warn" and allow_warnings:
         raise SystemExit(
-            f"entity-deps.local.json compatibility.status={status}, must be pass or warn. "
-            "(use --allow-incomplete only for debugging)"
+            "entity-deps.local.json compatibility.status=warn requires "
+            "decisions.compatibility_warnings_accepted before env.sh generation"
         )
+    raise SystemExit(
+        f"entity-deps.local.json compatibility.status={status}, must be pass. "
+        "(use --allow-incomplete only for debugging)"
+    )
 
 
 def generate_env(data: Dict[str, Any], json_path: Path) -> str:
@@ -637,7 +655,7 @@ def default_env_path(data: Dict[str, Any], json_path: Path) -> Path:
 
 def cmd_env(args: argparse.Namespace) -> None:
     data = load_json(args.json_path)
-    require_compatibility_pass(data, args.allow_incomplete)
+    require_compatibility_pass(data, args.allow_incomplete, args.allow_warnings)
     if args.output is None:
         args.output = default_env_path(data, args.json_path)
     script = generate_env(data, args.json_path)
@@ -925,24 +943,37 @@ def default_build_dir(req: Dict[str, Any]) -> str:
     return str(get_pgen_dir(req) / "build")
 
 
-def _verify_checkpoint_gate(checkpoint: Dict[str, Any], env_sh: Path) -> None:
+def _verify_checkpoint_gate(
+    checkpoint: Dict[str, Any],
+    env_sh: Path,
+    allow_warnings: bool = False,
+    allow_stale_env: bool = False,
+) -> None:
     compat = checkpoint.get("compatibility", {})
     if not isinstance(compat, dict):
         raise SystemExit("entity-deps.local.json missing compatibility section")
-    if compat.get("status") not in _NON_BLOCKING_STATUSES:
+    status = str(compat.get("status") or "")
+    if status == "warn" and allow_warnings and not _warnings_accepted(checkpoint):
         raise SystemExit(
-            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass' or 'warn'. "
+            "entity-deps.local.json compatibility.status=warn requires "
+            "decisions.compatibility_warnings_accepted before build script generation"
+        )
+    if status != "pass" and not (status == "warn" and allow_warnings and _warnings_accepted(checkpoint)):
+        raise SystemExit(
+            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass'. "
             f"Run entity_compat.py first."
         )
     checkpoint_env = checkpoint.get("env_sh", {})
     if isinstance(checkpoint_env, dict):
         recorded_path = checkpoint_env.get("path", "")
         if recorded_path and Path(recorded_path).resolve() != env_sh.resolve():
-            print(
-                f"WARNING: checkpoint env_sh.path ({recorded_path}) differs from "
-                f"--env argument ({env_sh}). The env.sh may be stale.",
-                file=sys.stderr,
+            msg = (
+                f"checkpoint env_sh.path ({recorded_path}) differs from "
+                f"--env argument ({env_sh}). The env.sh may be stale."
             )
+            if not allow_stale_env:
+                raise SystemExit(msg)
+            print(f"WARNING: {msg}", file=sys.stderr)
 
 
 def shell_command(parts: List[str]) -> str:
@@ -986,6 +1017,7 @@ def generate_build_script(
         lines.append("echo 'Cleaned previous build tree'")
     lines.extend([
         f'TS=$(date -u +%Y%m%dT%H%M%SZ)',
+        "mkdir -p \"$HOME/.entity-env-build\"",
         "# -- cmake configure --",
         f"{configure_cmd} 2>&1 | tee \"$LOG_DIR/entity-configure-$TS.log\"",
         f"echo '{{\"ts\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"run\":{run_id_q},\"action\":\"build.configure\",\"script\":\"entity-build.sh\",\"status\":\"ok\"}}' >> ~/.entity-env-build/run.log",
@@ -1022,7 +1054,12 @@ def cmd_build(args: argparse.Namespace) -> None:
                 protocol_error("generate.build", msg)
             raise SystemExit(msg)
         checkpoint = load_json(args.checkpoint)
-        _verify_checkpoint_gate(checkpoint, args.env.resolve())
+        _verify_checkpoint_gate(
+            checkpoint,
+            args.env.resolve(),
+            allow_warnings=args.allow_warnings,
+            allow_stale_env=args.allow_stale_env,
+        )
         env_fingerprint = (
             checkpoint.get("env_sh", {}).get("generated_at", "")
             if isinstance(checkpoint.get("env_sh"), dict)
@@ -1109,6 +1146,8 @@ def main() -> None:
     p_env.add_argument("json_path", type=Path)
     p_env.add_argument("--output", type=Path)
     p_env.add_argument("--allow-incomplete", action="store_true")
+    p_env.add_argument("--allow-warnings", action="store_true",
+                       help="Allow compatibility.status=warn only when decisions.compatibility_warnings_accepted is set.")
     p_env.add_argument("--no-update-json", action="store_true")
     add_json_flag(p_env)
 
@@ -1120,6 +1159,10 @@ def main() -> None:
     p_build.add_argument("--output", type=Path)
     p_build.add_argument("--clean-build", action="store_true",
                          help="Remove build tree before cmake configure (disables incremental build)")
+    p_build.add_argument("--allow-warnings", action="store_true",
+                         help="Allow compatibility.status=warn only when decisions.compatibility_warnings_accepted is set.")
+    p_build.add_argument("--allow-stale-env", action="store_true",
+                         help="Allow --env to differ from checkpoint env_sh.path. Use only for debugging.")
     p_build.add_argument("--no-update-json", action="store_true")
     p_build.add_argument("--run-id", help="Run ID for event log (auto-generated if omitted)")
     add_json_flag(p_build)

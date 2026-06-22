@@ -20,6 +20,9 @@ from _version_profile import profile_for, detect_profile_name
 from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, COMPAT_OVERRIDE_MAP, override_satisfies, version_satisfies, COMPILER_KNOWN_BAD
 
 
+SUPPORTED_SCHEMA_VERSION = 1
+
+
 def add(
     checks: List[Dict[str, Any]],
     check_id: str,
@@ -37,6 +40,45 @@ def add(
             "remediation": remediation,
         }
     )
+
+
+def _get_dotted(obj: Dict[str, Any], dotted: str) -> Any:
+    cur: Any = obj
+    for part in dotted.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def _same_request_value(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        actual_bool = str(actual).lower() in {"true", "1", "yes"}
+        expected_bool = str(expected).lower() in {"true", "1", "yes"}
+        return actual_bool == expected_bool
+    return actual == expected
+
+
+REQUEST_SNAPSHOT_FIELDS = [
+    "entity.checkout_root",
+    "entity.workdir",
+    "entity.version_bucket",
+    "entity.dependency_profile",
+    "environment.backend",
+    "environment.output",
+    "environment.mpi",
+    "environment.gpu_aware_mpi",
+    "compile.pgen",
+    "compile.pgens",
+    "compile.cxx_standard",
+    "compile.precision",
+    "compile.deposit",
+    "compile.shape_order",
+    "compile.debug",
+    "compile.tests",
+    "compile.build_intent",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +720,29 @@ def run_checks(
     issues: List[str] = []
 
     # -- Section 1: Request / checkpoint consistency ------------------------
+    req_schema = req.get("schema_version")
+    checkpoint_schema = checkpoint.get("schema_version")
+    if req_schema != SUPPORTED_SCHEMA_VERSION:
+        add(
+            checks,
+            "schema.requirements",
+            "fail",
+            "Unsupported requirements.json schema_version",
+            {"expected": SUPPORTED_SCHEMA_VERSION, "actual": req_schema},
+            remediation=f"Regenerate requirements.json with schema_version={SUPPORTED_SCHEMA_VERSION}.",
+        )
+        issues.append("Unsupported requirements.json schema_version")
+    if checkpoint_schema != SUPPORTED_SCHEMA_VERSION:
+        add(
+            checks,
+            "schema.checkpoint",
+            "fail",
+            "Unsupported entity-deps.local.json schema_version",
+            {"expected": SUPPORTED_SCHEMA_VERSION, "actual": checkpoint_schema},
+            remediation=f"Regenerate entity-deps.local.json with schema_version={SUPPORTED_SCHEMA_VERSION}.",
+        )
+        issues.append("Unsupported entity-deps.local.json schema_version")
+
     req_path = (
         checkpoint.get("requirements", {}).get("path", "")
         if isinstance(checkpoint.get("requirements"), dict)
@@ -693,6 +758,50 @@ def run_checks(
                 f"Checkpoint references requirements.json path that does not exist: {req_path}",
                 {"requirements_path": req_path},
                 remediation="Update entity-deps.local.json.requirements.path.",
+            )
+
+    req_record = checkpoint.get("requirements", {})
+    embedded = req_record.get("embedded") if isinstance(req_record, dict) else None
+    if not isinstance(embedded, dict):
+        add(
+            checks,
+            "consistency.requirements_embedded",
+            "fail",
+            "Checkpoint does not embed the request fields required for reuse validation",
+            {},
+            remediation="Regenerate entity-deps.local.json with entity_checkpoint.py create.",
+        )
+        issues.append("Checkpoint does not embed reusable requirements snapshot")
+    else:
+        mismatches: List[Dict[str, Any]] = []
+        for field in REQUEST_SNAPSHOT_FIELDS:
+            req_value = _get_dotted(req, field)
+            embedded_value = _get_dotted(embedded, field)
+            if req_value in (None, "") and embedded_value in (None, ""):
+                continue
+            if not _same_request_value(req_value, embedded_value):
+                mismatches.append({
+                    "field": field,
+                    "requirements": req_value,
+                    "checkpoint": embedded_value,
+                })
+        if mismatches:
+            add(
+                checks,
+                "consistency.requirements_embedded",
+                "fail",
+                "Checkpoint was created for different requirements",
+                {"mismatches": mismatches},
+                remediation="Regenerate or repair entity-deps.local.json for the current requirements.json.",
+            )
+            issues.append("Checkpoint requirements snapshot differs from current requirements.json")
+        else:
+            add(
+                checks,
+                "consistency.requirements_embedded",
+                "pass",
+                "Checkpoint requirements snapshot matches current requirements",
+                {},
             )
 
     cp_entity = checkpoint.get("entity", {}) if isinstance(checkpoint.get("entity"), dict) else {}
@@ -976,6 +1085,13 @@ def main() -> None:
     }
     if not args.no_update_json:
         checkpoint["compatibility"] = compatibility
+        status_section = checkpoint.setdefault("status", {})
+        if isinstance(status_section, dict):
+            status_section["checkpoint"] = "complete" if status == "pass" else "incompatible"
+            status_section["satisfies_requirements_json"] = status == "pass"
+            env_sh = checkpoint.get("env_sh", {})
+            env_generated = isinstance(env_sh, dict) and env_sh.get("status") == "generated"
+            status_section["ready_for_entity_build"] = status == "pass" and env_generated
         write_json_atomic(args.checkpoint, checkpoint)
 
     if args.json:

@@ -4,6 +4,7 @@
 Subcommands:
   validate <requirements.json>
   create <requirements.json> [--merge <old.json>] [--from-discovery <discovery.json>]
+  record-install --checkpoint <entity-deps.local.json> --dep <name> ...
 """
 
 import argparse
@@ -50,6 +51,38 @@ def _has(obj: Dict[str, Any], dotted: str) -> bool:
     if isinstance(val, str) and val == "":
         return False
     return True
+
+
+def requirements_snapshot(req: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the request fields that make a dependency checkpoint reusable."""
+    entity = req.get("entity", {}) if isinstance(req.get("entity"), dict) else {}
+    env = req.get("environment", {}) if isinstance(req.get("environment"), dict) else {}
+    compile_cfg = req.get("compile", {}) if isinstance(req.get("compile"), dict) else {}
+    return {
+        "entity": {
+            "checkout_root": entity.get("checkout_root", ""),
+            "workdir": entity.get("workdir", ""),
+            "version_bucket": entity.get("version_bucket", ""),
+            "dependency_profile": entity.get("dependency_profile", ""),
+        },
+        "environment": {
+            "backend": env.get("backend", ""),
+            "output": env.get("output", True),
+            "mpi": env.get("mpi", False),
+            "gpu_aware_mpi": env.get("gpu_aware_mpi", False),
+        },
+        "compile": {
+            "pgen": compile_cfg.get("pgen", ""),
+            "pgens": compile_cfg.get("pgens", ""),
+            "cxx_standard": compile_cfg.get("cxx_standard", ""),
+            "precision": compile_cfg.get("precision", ""),
+            "deposit": compile_cfg.get("deposit", ""),
+            "shape_order": compile_cfg.get("shape_order", ""),
+            "debug": compile_cfg.get("debug", False),
+            "tests": compile_cfg.get("tests", False),
+            "build_intent": compile_cfg.get("build_intent", ""),
+        },
+    }
 
 
 # ===========================================================================
@@ -120,14 +153,17 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
     req = load_json(args.requirements_json)
     result = run_validation(req)
+    blocking = result["status"] == "fail" or (
+        result["status"] == "partial" and not args.allow_partial
+    )
 
     if args.json:
-        if result["status"] == "fail":
+        if blocking:
             protocol_error("checkpoint.validate", "Validation failed", result=result)
         protocol_ok("checkpoint.validate", result=result)
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
-        if result["status"] == "fail":
+        if blocking:
             raise SystemExit(1)
 
 
@@ -195,7 +231,7 @@ def build_checkpoint(
         "generated_at": now,
         "requirements": {
             "path": "",
-            "embedded": None,
+            "embedded": requirements_snapshot(req),
         },
         "target": detect_target(),
         "entity": {
@@ -275,6 +311,103 @@ def cmd_create(args: argparse.Namespace) -> None:
 
 
 # ===========================================================================
+# Subcommand: record-install
+# ===========================================================================
+
+
+ALLOWED_DEPS = {"cmake", "compiler", "gpu_toolkit", "mpi", "kokkos", "hdf5", "adios2"}
+
+
+def _path_if_set(value: Optional[Path], kind: str) -> str:
+    if value is None:
+        return ""
+    if kind == "dir" and not value.is_dir():
+        raise SystemExit(f"{kind} path does not exist or is not a directory: {value}")
+    if kind == "file" and not value.is_file():
+        raise SystemExit(f"{kind} path does not exist or is not a file: {value}")
+    if kind == "exists" and not value.exists():
+        raise SystemExit(f"path does not exist: {value}")
+    return str(value.resolve())
+
+
+def cmd_record_install(args: argparse.Namespace) -> None:
+    checkpoint = load_json(args.checkpoint)
+    dep = args.dep.lower()
+    if dep not in ALLOWED_DEPS:
+        raise SystemExit(f"unsupported dependency: {args.dep}")
+
+    prefix = _path_if_set(args.prefix, "dir")
+    cmake_config = _path_if_set(args.cmake_config, "file")
+    bin_path = _path_if_set(args.bin, "exists")
+    include = _path_if_set(args.include, "dir")
+    lib = _path_if_set(args.lib, "exists")
+    log_path = _path_if_set(args.log, "file")
+
+    if not (prefix or cmake_config or bin_path):
+        raise SystemExit("record-install requires at least one of --prefix, --cmake-config, or --bin")
+
+    selected = checkpoint.setdefault("selected", {})
+    if not isinstance(selected, dict):
+        selected = {}
+        checkpoint["selected"] = selected
+
+    existing = selected.get(dep, {})
+    if not isinstance(existing, dict):
+        existing = {}
+
+    now = datetime.now(timezone.utc).isoformat()
+    entry: Dict[str, Any] = dict(existing)
+    entry.update({
+        "name": dep,
+        "provider": args.provider,
+        "validation": {
+            **(existing.get("validation", {}) if isinstance(existing.get("validation"), dict) else {}),
+            "installed": True,
+            "recorded_at": now,
+        },
+    })
+    if args.version:
+        entry["version"] = args.version
+    if prefix:
+        entry["prefix"] = prefix
+    if bin_path:
+        entry["bin"] = bin_path
+    if include:
+        entry["include"] = include
+    if lib:
+        entry["lib"] = lib
+    if cmake_config:
+        entry["cmake_config"] = cmake_config
+    if args.compiler_signature:
+        entry["compiler_signature"] = args.compiler_signature
+    if args.mpi_signature:
+        entry["mpi_signature"] = args.mpi_signature
+    if log_path:
+        validation = entry.setdefault("validation", {})
+        if isinstance(validation, dict):
+            validation["install_log"] = log_path
+
+    selected[dep] = entry
+    checkpoint["paths"] = derive_paths(selected)
+    checkpoint["compatibility"] = {
+        "status": "unknown",
+        "checked_at": "",
+        "checks": [],
+        "issues": ["dependency install record changed; rerun compatibility check"],
+    }
+    status = checkpoint.setdefault("status", {})
+    if isinstance(status, dict):
+        status["checkpoint"] = "partial"
+        status["ready_for_entity_build"] = False
+
+    write_json_atomic(args.checkpoint, checkpoint)
+    if args.json:
+        protocol_ok("checkpoint.record_install", checkpoint=str(args.checkpoint.resolve()), dep=dep)
+    else:
+        print(f"recorded {dep} install evidence in {args.checkpoint.resolve()}")
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -286,6 +419,8 @@ def main() -> None:
     # --- validate ---
     p_val = sub.add_parser("validate", help="Validate requirements.json completeness and consistency")
     p_val.add_argument("requirements_json", type=Path)
+    p_val.add_argument("--allow-partial", action="store_true",
+                       help="Exit 0 for consistency issues. Use only while drafting requirements.")
     add_json_flag(p_val)
 
     # --- create ---
@@ -299,6 +434,23 @@ def main() -> None:
                        help="Output path (default: $ENTITY_WORKDIR/entity-deps.local.json)")
     add_json_flag(p_cre)
 
+    # --- record-install ---
+    p_rec = sub.add_parser("record-install", help="Record installed dependency evidence in checkpoint JSON")
+    p_rec.add_argument("--checkpoint", type=Path, required=True, help="entity-deps.local.json to update")
+    p_rec.add_argument("--dep", required=True, help="Dependency name: cmake, compiler, gpu_toolkit, mpi, kokkos, hdf5, adios2")
+    p_rec.add_argument("--provider", default="source-build",
+                       choices=["module", "system", "local-prefix", "source-build", "entity-dependencies", "unknown", "none"])
+    p_rec.add_argument("--prefix", type=Path)
+    p_rec.add_argument("--cmake-config", type=Path, dest="cmake_config")
+    p_rec.add_argument("--bin", type=Path)
+    p_rec.add_argument("--include", type=Path)
+    p_rec.add_argument("--lib", type=Path)
+    p_rec.add_argument("--version", default="")
+    p_rec.add_argument("--compiler-signature", default="")
+    p_rec.add_argument("--mpi-signature", default="")
+    p_rec.add_argument("--log", type=Path)
+    add_json_flag(p_rec)
+
     args = parser.parse_args()
     if args.subcommand is None:
         parser.print_help()
@@ -307,6 +459,8 @@ def main() -> None:
         cmd_validate(args)
     elif args.subcommand == "create":
         cmd_create(args)
+    elif args.subcommand == "record-install":
+        cmd_record_install(args)
 
 
 if __name__ == "__main__":

@@ -133,7 +133,14 @@ Required shape:
 {
   "schema_version": 1,
   "generated_at": "",
-  "requirements": {},
+  "requirements": {
+    "path": "",
+    "embedded": {
+      "entity": {},
+      "environment": {},
+      "compile": {}
+    }
+  },
   "target": {},
   "entity": {},
   "candidates": {},
@@ -197,6 +204,12 @@ Selected dependency entries should use this shape when possible:
   "validation": {}
 }
 ```
+
+`requirements.embedded` stores only the fields that decide whether a checkpoint
+can be reused for the current request: checkout/workdir/version profile,
+backend, output, MPI mode, GPU-aware MPI, pgen/pgens, C++ standard, precision,
+deposit, shape order, debug/tests, and build intent. `entity_compat.py` fails
+when this snapshot differs from the current `requirements.json`.
 
 ## Modules
 
@@ -310,6 +323,11 @@ Current override map:
 |----------|--------------|
 | `compiler.version.nvcc` | `nvcc_version_override` |
 
+Separate from check-specific overrides, `decisions.compatibility_warnings_accepted`
+can acknowledge a warning-only compatibility result for explicit debugging flows.
+Generation commands still require `--allow-warnings`; by default only
+`compatibility.status=pass` may generate `env.sh` or `entity-build.sh`.
+
 ## Compatibility Result
 
 `compatibility.status=pass` requires:
@@ -326,6 +344,7 @@ Current override map:
 - runtime library paths exist where required.
 
 Use `partial` only for non-blocking issues explicitly safe before Entity build.
+By default, `partial` and `warn` are blocking for generated artifacts.
 
 Run:
 
@@ -362,6 +381,10 @@ After `entity-build.sh` generation or execution, update `requirements.json`:
     "status": "not_run|running|pass|fail",
     "started_at": "",
     "finished_at": "",
+    "exit_code": 0,
+    "run_id": "",
+    "runner_log": "",
+    "script": "",
     "configure_command": "",
     "build_command": "",
     "expected_executable": ""

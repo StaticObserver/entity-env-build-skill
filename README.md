@@ -22,8 +22,10 @@
 
 ```text
 scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_checkpoint.py   ← record-install dependency evidence
 scripts/entity_compat.py       ← compatibility check
 scripts/entity_generate.py     ← deps / env / build 生成
+scripts/entity_run.py          ← run build scripts + record results
 ```
 
 典型顺序：
@@ -40,6 +42,13 @@ python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" 
 python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
 
+# Record a completed source-build install (example)
+python3 scripts/entity_checkpoint.py record-install \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --dep kokkos \
+  --prefix "$ENTITY_WORKDIR/deps/kokkos/5.0.1" \
+  --cmake-config "$ENTITY_WORKDIR/deps/kokkos/5.0.1/lib64/cmake/Kokkos/KokkosConfig.cmake"
+
 # Compatibility check
 python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
@@ -53,6 +62,10 @@ python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --env "$ENTITY_WORKDIR/env.sh" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/entity-build.sh"
+
+# Run generated build script and update build_result
+python3 scripts/entity_run.py build "$ENTITY_WORKDIR/requirements.json" \
+  --script "$ENTITY_WORKDIR/entity-build.sh"
 ```
 
 详细契约见 `SKILL.md` 和 `references/`。
@@ -79,8 +92,10 @@ Main scripts:
 
 ```text
 scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_checkpoint.py   ← record-install dependency evidence
 scripts/entity_compat.py       ← compatibility check
 scripts/entity_generate.py     ← deps / env / build generation
+scripts/entity_run.py          ← run build scripts + record results
 ```
 
 Typical sequence:
@@ -97,6 +112,13 @@ python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" 
 python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
 
+# Record a completed source-build install (example)
+python3 scripts/entity_checkpoint.py record-install \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --dep kokkos \
+  --prefix "$ENTITY_WORKDIR/deps/kokkos/5.0.1" \
+  --cmake-config "$ENTITY_WORKDIR/deps/kokkos/5.0.1/lib64/cmake/Kokkos/KokkosConfig.cmake"
+
 # Compatibility check
 python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
@@ -110,6 +132,10 @@ python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
   --env "$ENTITY_WORKDIR/env.sh" \
   --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
   --output "$ENTITY_WORKDIR/entity-build.sh"
+
+# Run generated build script and update build_result
+python3 scripts/entity_run.py build "$ENTITY_WORKDIR/requirements.json" \
+  --script "$ENTITY_WORKDIR/entity-build.sh"
 ```
 
 See `SKILL.md` and `references/` for the full contract.
