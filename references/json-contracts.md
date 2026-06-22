@@ -346,6 +346,31 @@ Generation commands still require `--allow-warnings`; by default only
 Use `partial` only for non-blocking issues explicitly safe before Entity build.
 By default, `partial` and `warn` are blocking for generated artifacts.
 
+The compatibility result also records checker coverage. Coverage explains what
+the current checker proved; it does not create a new pass path:
+
+```json
+{
+  "compatibility": {
+    "status": "pass",
+    "checker_version": 1,
+    "checked_at": "",
+    "coverage": {
+      "requirements_checkpoint_match": "implemented",
+      "dependency_path_existence": "implemented",
+      "compiler_signature": "partial",
+      "path_list_existence": "not_implemented",
+      "cmake_package_probe": "not_implemented"
+    },
+    "checks": [],
+    "issues": []
+  }
+}
+```
+
+Required checks marked `partial` or `not_implemented` should be treated as known
+limitations, not silently folded into a complete proof.
+
 Run:
 
 ```bash

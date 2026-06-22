@@ -19,12 +19,14 @@ from typing import Any, Dict, List, Optional
 from _json_io import (
     add_json_flag,
     derive_paths,
+    get_dotted,
     load_json,
     protocol_error,
     protocol_ok,
     write_json_atomic,
 )
 from _version_profile import version_profile as detect_version_profile
+from entity_state import record_step
 from entity_schema import CONSISTENCY_RULES, OPTIONAL_DEFAULTS, REQUIRED_ALWAYS, REQUIRED_BUILD
 
 
@@ -33,19 +35,8 @@ from entity_schema import CONSISTENCY_RULES, OPTIONAL_DEFAULTS, REQUIRED_ALWAYS,
 # ===========================================================================
 
 
-def _get(obj: Dict[str, Any], dotted: str) -> Any:
-    """Drill into *obj* using dotted path. Returns None when any key is missing."""
-    cur: Any = obj
-    for part in dotted.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur
-
-
 def _has(obj: Dict[str, Any], dotted: str) -> bool:
-    val = _get(obj, dotted)
+    val = get_dotted(obj, dotted)
     if val is None:
         return False
     if isinstance(val, str) and val == "":
@@ -103,14 +94,14 @@ def check_consistency(req: Dict[str, Any]) -> List[Dict[str, str]]:
     for rule_id, condition, pair, msg in CONSISTENCY_RULES:
         if condition:
             cond_field, cond_val = condition
-            actual = _get(req, cond_field)
+            actual = get_dotted(req, cond_field)
             if actual is None or str(actual).lower() != cond_val:
                 continue
 
         field_a, field_b = pair
-        val_a = _get(req, field_a)
+        val_a = get_dotted(req, field_a)
         if field_b:
-            val_b = _get(req, field_b)
+            val_b = get_dotted(req, field_b)
             if rule_id == "pgen.mutex" and val_a is not None and val_b is not None:
                 issues.append({"rule": rule_id, "message": msg, "fields": [field_a, field_b]})
         else:
@@ -156,6 +147,13 @@ def cmd_validate(args: argparse.Namespace) -> None:
     blocking = result["status"] == "fail" or (
         result["status"] == "partial" and not args.allow_partial
     )
+    if result["status"] == "pass":
+        record_step(
+            args.requirements_json.parent,
+            "requirements_validated",
+            "pass",
+            inputs={"requirements_json": str(args.requirements_json.resolve())},
+        )
 
     if args.json:
         if blocking:
@@ -303,6 +301,14 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     checkpoint["requirements"]["path"] = str(args.requirements_json.resolve())
     write_json_atomic(output_path, checkpoint)
+    record_step(
+        output_path.parent,
+        "checkpoint_updated",
+        "pass",
+        inputs={"requirements_json": str(args.requirements_json.resolve())},
+        outputs={"checkpoint_json": str(output_path.resolve())},
+        message="checkpoint created",
+    )
 
     if args.json:
         protocol_ok("checkpoint.create", output=str(output_path.resolve()))
@@ -401,6 +407,14 @@ def cmd_record_install(args: argparse.Namespace) -> None:
         status["ready_for_entity_build"] = False
 
     write_json_atomic(args.checkpoint, checkpoint)
+    record_step(
+        args.checkpoint.parent,
+        "checkpoint_updated",
+        "pass",
+        inputs={"checkpoint_json": str(args.checkpoint.resolve())},
+        outputs={"checkpoint_json": str(args.checkpoint.resolve())},
+        message=f"recorded {dep} install evidence",
+    )
     if args.json:
         protocol_ok("checkpoint.record_install", checkpoint=str(args.checkpoint.resolve()), dep=dep)
     else:

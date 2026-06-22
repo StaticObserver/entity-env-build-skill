@@ -1,16 +1,14 @@
 """Shared JSON I/O helpers for entity-env-build scripts.
 
 Import this instead of duplicating load_json / write_json_atomic in every script.
-Also provides: unified --json protocol output, session state, site notes,
-harness runtime logging, and path derivation.
+Also provides: unified --json protocol output, harness runtime logging,
+and path derivation.
 """
 
 import json
-import os
 import shutil
 import sys
 import tempfile
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,7 +34,6 @@ want to reset the harness's machine-level knowledge.
 |------|---------|--------|-----------|
 | `run.log` | Audit trail of every script invocation and build step | JSON-lines, append-only | Append forever; trim manually if needed |
 | `site-notes/<hostname>.md` | Machine-specific dependency knowledge, known-good combinations, and discovered issues | Markdown | Updated after builds; grows with experience |
-| `compat/<run_id>.json` | Full compatibility check reports for each build run | JSON | One file per build run; can be archived |
 
 ## Notes
 
@@ -44,8 +41,8 @@ want to reset the harness's machine-level knowledge.
   fails, check this file first.
 - `site-notes/` is read at the start of every Phase 2 environment probe.
   It helps the agent avoid repeating known mistakes.
-- `compat/` reports are snapshots for debugging; the agent also records
-  the latest result in `entity-deps.local.json.compatibility`.
+- Compatibility results are recorded in `entity-deps.local.json.compatibility`
+  and saved to `compat/<run_id>.json` by the agent workflow.
 """
 
 
@@ -100,6 +97,17 @@ def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
         f.write(text)
         tmp = Path(f.name)
     tmp.replace(path)
+
+
+def get_dotted(obj: Dict[str, Any], dotted: str) -> Any:
+    """Drill into *obj* using dotted path. Returns None when any key is missing."""
+    cur: Any = obj
+    for part in dotted.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
 
 
 # ---------------------------------------------------------------------------
@@ -237,82 +245,7 @@ def derive_paths(selected: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
-
-
-SESSION_STATE_FILE = ".entity-session.json"
-
-
-def init_session_state(
-    workdir: Path,
-    artifacts: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
-    """Create or load a session state file in *workdir*."""
-    path = workdir / SESSION_STATE_FILE
-    if path.exists():
-        state = load_json(path)
-        state["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return state
-
-    now = datetime.now(timezone.utc).isoformat()
-    state: Dict[str, Any] = {
-        "schema_version": 1,
-        "session_id": str(uuid.uuid4())[:8],
-        "started_at": now,
-        "updated_at": now,
-        "phase": "requirements",
-        "completed_steps": {
-            "requirements_validated": False,
-            "checkpoint_loaded": False,
-            "dependency_probing_done": False,
-            "checkpoint_written": False,
-            "compatibility_checked": False,
-            "env_generated": False,
-            "build_script_generated": False,
-            "build_executed": False,
-        },
-        "last_action": "Session started",
-        "last_action_at": now,
-        "build_attempts": 0,
-        "requirements_json": str(artifacts.get("requirements_json", "")) if artifacts else "",
-        "checkpoint_json": str(artifacts.get("checkpoint_json", "")) if artifacts else "",
-        "env_sh": str(artifacts.get("env_sh", "")) if artifacts else "",
-        "entity_build_sh": str(artifacts.get("entity_build_sh", "")) if artifacts else "",
-    }
-    write_json_atomic(path, state)
-    return state
-
-
-def update_session_state(workdir: Path, **updates: Any) -> None:
-    """Update fields in the session state file. Creates one if missing."""
-    path = workdir / SESSION_STATE_FILE
-    if path.exists():
-        state = load_json(path)
-    else:
-        state = init_session_state(workdir)
-
-    now = datetime.now(timezone.utc).isoformat()
-    state["updated_at"] = now
-
-    for key, value in updates.items():
-        if key == "completed_steps" and isinstance(value, dict):
-            steps = state.setdefault("completed_steps", {})
-            if isinstance(steps, dict):
-                steps.update(value)
-        elif key == "last_action":
-            state["last_action"] = str(value)
-            state["last_action_at"] = now
-        elif key == "phase":
-            state["phase"] = str(value)
-        else:
-            state[key] = value
-
-    write_json_atomic(path, state)
-
-
-# ---------------------------------------------------------------------------
-# Site notes — runtime artifacts in harness home
+# Site notes — runtime artifacts in harness home (agent-managed)
 # ---------------------------------------------------------------------------
 
 
@@ -324,25 +257,3 @@ def site_notes_base() -> Path:
     return base
 
 
-def find_site_notes(hostname: str) -> Optional[Path]:
-    """Return the path to site-notes/<hostname>.md if it exists."""
-    base = site_notes_base()
-    short = hostname.partition(".")[0]
-    candidates = [
-        base / f"{hostname}.md",
-        base / f"{short}.md",
-    ]
-    for cand in candidates:
-        if cand.exists():
-            return cand
-
-    for child in sorted(base.iterdir()):
-        if child.suffix == ".md" and short in child.stem:
-            return child
-    return None
-
-
-def site_notes_path(hostname: str) -> Path:
-    """Return the canonical path for a site-notes file (whether it exists or not)."""
-    short = hostname.partition(".")[0]
-    return site_notes_base() / f"{short}.md"

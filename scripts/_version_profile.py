@@ -19,9 +19,12 @@ DEFAULT_VERSION_PROFILES = _DEFAULT_VERSION_PROFILES  # re-export
 def _parse_digits(version_str: str) -> List[int]:
     """Parse a version string like '1.4.0' or 'v1.4' into [major, minor, ...]."""
     digits: List[int] = []
-    for part in version_str.removeprefix("v").replace("x", "0").split("."):
+    for part in version_str.removeprefix("v").split("."):
+        part = part.strip()
         if part.isdigit():
             digits.append(int(part))
+        elif part in ("x", "X", "*"):
+            digits.append(0)
         else:
             break
     return digits
@@ -67,26 +70,12 @@ def inferred_cxx_standard(req: Dict[str, Any]) -> str:
     if isinstance(compile_cfg, dict) and compile_cfg.get("cxx_standard"):
         return str(compile_cfg["cxx_standard"])
 
-    entity = req.get("entity", {})
-    if isinstance(entity, dict):
-        profile = str(entity.get("dependency_profile") or "").lower()
-        if profile in PROFILES:
-            return PROFILES[profile]["cxx_standard"]
-        version = str(
-            entity.get("version_bucket") or entity.get("version") or ""
-        ).lower()
-        if not version:
-            raise SystemExit(
-                "requirements.json missing entity.version_bucket or entity.dependency_profile"
-            )
-        digits = _parse_digits(version)
-        if len(digits) >= 2 and (digits[0], digits[1]) < (1, 4):
-            return "17"
-        if len(digits) >= 2:
-            return "20"
-    raise SystemExit(
-        "requirements.json missing entity.version_bucket or entity.dependency_profile"
-    )
+    try:
+        return PROFILES[detect_profile_name(req)]["cxx_standard"]
+    except (ValueError, SystemExit):
+        raise SystemExit(
+            "requirements.json missing entity.version_bucket or entity.dependency_profile"
+        )
 
 
 def requested_version(req: Dict[str, Any], dep: str, profile: Dict[str, Any]) -> str:

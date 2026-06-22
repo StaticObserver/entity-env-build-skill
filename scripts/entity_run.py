@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from _json_io import add_json_flag, ensure_harness_home, load_json, log_event, protocol_ok, write_json_atomic
+from entity_state import record_step
 
 
 def _utc_now() -> str:
@@ -68,24 +69,32 @@ def cmd_build(args: argparse.Namespace) -> None:
     log_event(run_id, run_id, "build.run", "started", script=str(script.resolve()), artifacts=[str(run_log.resolve())])
 
     exit_code = 1
-    with run_log.open("w", encoding="utf-8") as log:
-        log.write(f"# entity_run.py build started {started_at}\n")
-        log.write(f"# script: {script.resolve()}\n\n")
-        proc = subprocess.Popen(
-            ["bash", str(script.resolve())],
-            cwd=str(script.parent.resolve()),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            log.write(line)
-            log.flush()
-            if not args.quiet:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-        exit_code = proc.wait()
+    try:
+        with run_log.open("w", encoding="utf-8") as log:
+            log.write(f"# entity_run.py build started {started_at}\n")
+            log.write(f"# script: {script.resolve()}\n\n")
+            proc = subprocess.Popen(
+                ["bash", str(script.resolve())],
+                cwd=str(script.parent.resolve()),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                if not args.quiet:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+            exit_code = proc.wait()
+    except Exception as exc:
+        try:
+            with run_log.open("a", encoding="utf-8") as log:
+                log.write(f"\n# Runner crashed: {exc}\n")
+        except OSError:
+            pass
+        exit_code = -1
 
     finished_at = _utc_now()
     status = "pass" if exit_code == 0 else "fail"
@@ -109,8 +118,32 @@ def cmd_build(args: argparse.Namespace) -> None:
         artifacts=[str(run_log.resolve()), str(args.requirements_json.resolve())],
         exit_code=exit_code,
     )
+    record_step(
+        script.parent,
+        "build_executed",
+        status,
+        inputs={
+            "requirements_json": str(args.requirements_json.resolve()),
+            "entity_build_sh": str(script.resolve()),
+        },
+        outputs={
+            "requirements_json": str(args.requirements_json.resolve()),
+            "runner_log": str(run_log.resolve()),
+        },
+        run_id=run_id,
+        message=f"exit_code={exit_code}",
+    )
 
     if args.json:
+        if exit_code != 0:
+            protocol_error(
+                "run.build",
+                f"Build failed with exit code {exit_code}",
+                result=status,
+                exit_code=exit_code,
+                run_id=run_id,
+                log=str(run_log.resolve()),
+            )
         protocol_ok(
             "run.build",
             result=status,

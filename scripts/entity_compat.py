@@ -15,12 +15,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from _json_io import add_json_flag, load_json, protocol_error, protocol_ok, write_json_atomic
+from _json_io import add_json_flag, get_dotted, load_json, protocol_error, protocol_ok, write_json_atomic
 from _version_profile import profile_for, detect_profile_name
+from entity_state import record_step
 from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, COMPAT_OVERRIDE_MAP, override_satisfies, version_satisfies, COMPILER_KNOWN_BAD
 
 
 SUPPORTED_SCHEMA_VERSION = 1
+CHECKER_VERSION = 1
+
+
+def compatibility_coverage() -> Dict[str, str]:
+    """Return the implemented coverage map for the compatibility contract."""
+    return {
+        "schema_version": "implemented",
+        "requirements_checkpoint_match": "implemented",
+        "dependency_path_existence": "implemented",
+        "compiler_executable": "implemented",
+        "version_profile": "implemented",
+        "cuda_nvcc_wrapper": "implemented",
+        "adios2_kokkos_profile": "implemented",
+        "source_build_install_evidence": "implemented",
+        "compiler_signature": "partial",
+        "gpu_arch_match": "partial",
+        "mpi_output_mode": "partial",
+        "path_list_existence": "not_implemented",
+        "cmake_package_probe": "not_implemented",
+    }
 
 
 def add(
@@ -40,16 +61,6 @@ def add(
             "remediation": remediation,
         }
     )
-
-
-def _get_dotted(obj: Dict[str, Any], dotted: str) -> Any:
-    cur: Any = obj
-    for part in dotted.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur
 
 
 def _same_request_value(actual: Any, expected: Any) -> bool:
@@ -345,12 +356,7 @@ def _cross_check_kokkos_compiler(
     kokkos_class = _classify(kokkos_cxx_basename)
     selected_class = _classify(selected_cxx_basename)
 
-    incompatible = (
-        kokkos_class != selected_class
-        # cross-check: nvcc_wrapper (CUDA) ≠ hipcc (HIP) — different GPU toolchains
-        or (kokkos_class == "cuda_wrapper" and selected_class == "hipcc")
-        or (kokkos_class == "hipcc" and selected_class == "cuda_wrapper")
-    )
+    incompatible = kokkos_class != selected_class
 
     if incompatible:
         add(
@@ -524,7 +530,7 @@ def run_cross_checks(
 # ---------------------------------------------------------------------------
 
 
-def _parse_gcc_version(version_str: str) -> tuple:
+def _parse_version_pair(version_str: str) -> tuple:
     """Extract (major, minor) from GCC version string like '12.3.0'."""
     import re as _re
     m = _re.search(r"(\d+)\.(\d+)", version_str)
@@ -550,34 +556,34 @@ def _check_compiler_min_versions(
 
     selected = checkpoint.get("selected", {}) if isinstance(checkpoint.get("selected"), dict) else {}
     compiler_ver = str(compiler.get("version") or "")
-    gcc_version = _parse_gcc_version(compiler_ver)
+    compiler_version = _parse_version_pair(compiler_ver)
 
     # Check GCC version
-    if "gcc" in required and gcc_version > (0, 0):
+    if "gcc" in required and compiler_version > (0, 0):
         min_gcc = required["gcc"]
-        if not version_satisfies(gcc_version, min_gcc):
+        if not version_satisfies(compiler_version, min_gcc):
             msg = (
-                f"GCC {gcc_version[0]}.{gcc_version[1]} is below minimum "
+                f"GCC {compiler_version[0]}.{compiler_version[1]} is below minimum "
                 f"{min_gcc[0]}.{min_gcc[1]} for {backend}/{profile_name}"
             )
             add(checks, "compiler.version.gcc", "fail", msg,
-                {"actual": list(gcc_version), "required": list(min_gcc)},
+                {"actual": list(compiler_version), "required": list(min_gcc)},
                 remediation=f"Upgrade GCC to {min_gcc[0]}.{min_gcc[1]}+ or select a newer module/spack compiler.")
             issues.append(msg)
         else:
             add(checks, "compiler.version.gcc", "pass",
-                f"GCC {gcc_version[0]}.{gcc_version[1]} satisfies minimum",
-                {"version": list(gcc_version)})
+                f"GCC {compiler_version[0]}.{compiler_version[1]} satisfies minimum",
+                {"version": list(compiler_version)})
 
     # Check GCC known-bad versions (blacklist)
-    if "gcc" in COMPILER_KNOWN_BAD and gcc_version > (0, 0):
-        gcc_triple = (gcc_version[0], gcc_version[1], 0)  # minor.patch unknown, check major.minor
+    if "gcc" in COMPILER_KNOWN_BAD and compiler_version > (0, 0):
+        gcc_triple = (compiler_version[0], compiler_version[1], 0)  # minor.patch unknown, check major.minor
         for bad_triple in COMPILER_KNOWN_BAD["gcc"]:
             if gcc_triple[0] == bad_triple[0] and gcc_triple[1] == bad_triple[1]:
                 add(checks, "compiler.version.gcc.known_bad", "warn",
-                    f"GCC {gcc_version[0]}.{gcc_version[1]}.x is known-bad: ICE with if constexpr. "
+                    f"GCC {compiler_version[0]}.{compiler_version[1]}.x is known-bad: ICE with if constexpr. "
                     f"Use GCC {bad_triple[0]}.{bad_triple[1]}+ or 11.x instead.",
-                    {"gcc_version": list(gcc_version), "known_bad": list(bad_triple)},
+                    {"gcc_version": list(compiler_version), "known_bad": list(bad_triple)},
                     remediation="Switch to GCC 13.3+ or GCC 11.x. Avoid GCC 12.x.")
                 break
 
@@ -585,7 +591,7 @@ def _check_compiler_min_versions(
     gpu_toolkit = selected.get("gpu_toolkit", {}) if isinstance(selected, dict) else {}
     nvcc_ver = str(gpu_toolkit.get("version") or "")
     if "nvcc" in required and nvcc_ver:
-        nvcc_version = _parse_gcc_version(nvcc_ver)
+        nvcc_version = _parse_version_pair(nvcc_ver)
         if nvcc_version > (0, 0):
             min_nvcc = required["nvcc"]
             if not version_satisfies(nvcc_version, min_nvcc):
@@ -606,7 +612,7 @@ def _check_compiler_min_versions(
     cmake_entry = selected.get("cmake", {}) if isinstance(selected, dict) else {}
     cmake_ver = str(cmake_entry.get("version") or "")
     if cmake_ver:
-        cmake_version = _parse_gcc_version(cmake_ver)
+        cmake_version = _parse_version_pair(cmake_ver)
         if cmake_version > (0, 0) and not version_satisfies(cmake_version, MIN_CMAKE_VERSION):
             msg = (
                 f"CMake {cmake_version[0]}.{cmake_version[1]} is below minimum "
@@ -775,8 +781,8 @@ def run_checks(
     else:
         mismatches: List[Dict[str, Any]] = []
         for field in REQUEST_SNAPSHOT_FIELDS:
-            req_value = _get_dotted(req, field)
-            embedded_value = _get_dotted(embedded, field)
+            req_value = get_dotted(req, field)
+            embedded_value = get_dotted(embedded, field)
             if req_value in (None, "") and embedded_value in (None, ""):
                 continue
             if not _same_request_value(req_value, embedded_value):
@@ -1032,7 +1038,7 @@ def run_checks(
                 remediation=f"Ensure selected.{dep} has prefix, cmake_config, or bin "
                 f"that points to a real installation.",
             )
-            if dep not in [i for i in issues]:
+            if f"{dep} is missing installed/discoverable evidence" not in issues:
                 issues.append(f"{dep} is missing installed/discoverable evidence")
 
     # -- Section 7: Cross-dependency toolchain consistency -------------------
@@ -1079,7 +1085,9 @@ def main() -> None:
     status, checks, issues = run_checks(req, checkpoint)
     compatibility = {
         "status": status,
+        "checker_version": CHECKER_VERSION,
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "coverage": compatibility_coverage(),
         "checks": checks,
         "issues": issues,
     }
@@ -1093,6 +1101,17 @@ def main() -> None:
             env_generated = isinstance(env_sh, dict) and env_sh.get("status") == "generated"
             status_section["ready_for_entity_build"] = status == "pass" and env_generated
         write_json_atomic(args.checkpoint, checkpoint)
+        record_step(
+            args.checkpoint.parent,
+            "compatibility_checked",
+            status,
+            inputs={
+                "requirements_json": str(args.requirements_json.resolve()),
+                "checkpoint_json": str(args.checkpoint.resolve()),
+            },
+            outputs={"checkpoint_json": str(args.checkpoint.resolve())},
+            message=f"{len(issues)} issue(s)",
+        )
 
     if args.json:
         if status != "pass":
