@@ -4,7 +4,7 @@
 
 ---
 
-`entity-env-build` is a Codex skill for preparing an Entity build environment and building Entity itself. It splits one Entity build into three phases:
+`entity-env-build` prepares an Entity build environment and builds Entity itself. It splits one Entity build into three phases:
 
 1. Confirm the current build requirements and write `requirements.json`.
 2. Discover, select, and validate local dependencies, then write `entity-deps.local.json` and `env.sh`.

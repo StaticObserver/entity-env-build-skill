@@ -4,7 +4,7 @@
 
 ---
 
-`entity-env-build` 是一个用于构建 Entity 项目环境与本体的 Codex skill。它把一次 Entity 编译拆成三个阶段：
+`entity-env-build` 用于构建 Entity 项目环境与本体。它把一次 Entity 编译拆成三个阶段：
 
 1. 确认当前构建需求并生成 `requirements.json`。
 2. 搜索、选择、检查本地依赖，生成 `entity-deps.local.json` 和 `env.sh`。
