@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from _json_io import add_json_flag, load_json, protocol_error, protocol_ok, write_json_atomic
 from _version_profile import profile_for, detect_profile_name
-from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, version_satisfies
+from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, COMPAT_OVERRIDE_MAP, override_satisfies, version_satisfies, COMPILER_KNOWN_BAD
 
 
 def add(
@@ -527,6 +527,18 @@ def _check_compiler_min_versions(
                 f"GCC {gcc_version[0]}.{gcc_version[1]} satisfies minimum",
                 {"version": list(gcc_version)})
 
+    # Check GCC known-bad versions (blacklist)
+    if "gcc" in COMPILER_KNOWN_BAD and gcc_version > (0, 0):
+        gcc_triple = (gcc_version[0], gcc_version[1], 0)  # minor.patch unknown, check major.minor
+        for bad_triple in COMPILER_KNOWN_BAD["gcc"]:
+            if gcc_triple[0] == bad_triple[0] and gcc_triple[1] == bad_triple[1]:
+                add(checks, "compiler.version.gcc.known_bad", "warn",
+                    f"GCC {gcc_version[0]}.{gcc_version[1]}.x is known-bad: ICE with if constexpr. "
+                    f"Use GCC {bad_triple[0]}.{bad_triple[1]}+ or 11.x instead.",
+                    {"gcc_version": list(gcc_version), "known_bad": list(bad_triple)},
+                    remediation="Switch to GCC 13.3+ or GCC 11.x. Avoid GCC 12.x.")
+                break
+
     # Check NVCC version
     gpu_toolkit = selected.get("gpu_toolkit", {}) if isinstance(selected, dict) else {}
     nvcc_ver = str(gpu_toolkit.get("version") or "")
@@ -562,6 +574,57 @@ def _check_compiler_min_versions(
                 {"actual": list(cmake_version), "required": list(MIN_CMAKE_VERSION)},
                 remediation=f"Install CMake {MIN_CMAKE_VERSION[0]}.{MIN_CMAKE_VERSION[1]}+")
             issues.append(msg)
+
+
+# ---------------------------------------------------------------------------
+# Override machinery — user-acknowledged risks downgrade fail→warn
+# ---------------------------------------------------------------------------
+
+
+def _apply_overrides(
+    checks: List[Dict[str, Any]],
+    issues: List[str],
+    checkpoint: Dict[str, Any],
+) -> None:
+    """Scan decisions in checkpoint for overrides; downgrade matching fail→warn."""
+    decisions = checkpoint.get("decisions", {})
+    if not isinstance(decisions, dict) or not decisions:
+        return
+
+    overridden_ids: set = set()
+    for i, check in enumerate(checks):
+        check_id = str(check.get("id") or "")
+        if check.get("status") != "fail":
+            continue
+        override_key = COMPAT_OVERRIDE_MAP.get(check_id)
+        if not override_key:
+            continue
+        override_value = decisions.get(override_key)
+        if not override_satisfies(override_value):
+            continue
+
+        # Downgrade fail→warn
+        checks[i]["status"] = "warn"
+        checks[i]["summary"] = check["summary"] + " (overridden by decisions." + override_key + ")"
+        overridden_ids.add(check_id)
+
+    # Remove any issue that belongs to an overridden check
+    if overridden_ids:
+        # Match issues to check IDs by substring: the issue text starts with the check topic
+        # e.g. "NVCC 12.0 is below minimum..." matches check "compiler.version.nvcc"
+        remaining = []
+        for issue in issues:
+            issue_lower = issue.lower()
+            kept = True
+            for override_id in overridden_ids:
+                override_topic = override_id.rsplit(".", 1)[-1]
+                if override_topic in issue_lower:
+                    kept = False
+                    break
+            if kept:
+                remaining.append(issue)
+        issues.clear()
+        issues.extend(remaining)
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +950,9 @@ def run_checks(
                 issues.append(
                     f"{dep} source-build script has not produced installed dependency evidence"
                 )
+
+    # -- Section 9: Apply decisions overrides (fail→warn) --------------------
+    _apply_overrides(checks, issues, checkpoint)
 
     return ("pass" if not issues else "fail"), checks, issues
 

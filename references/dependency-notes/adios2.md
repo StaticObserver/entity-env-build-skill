@@ -23,6 +23,7 @@ Baseline (all profiles):
 -DBUILD_TESTING=OFF
 -DADIOS2_BUILD_EXAMPLES=OFF
 -DADIOS2_USE_HDF5=ON
+-DADIOS2_BUILD_TOOLS=OFF
 ```
 
 Profile/backend-dependent:
@@ -67,18 +68,9 @@ with Kokkos first (so ADIOS2 finds KokkosConfig.cmake before falling back to non
 - Fix: Set `-DCMAKE_CUDA_COMPILER=<cuda_prefix>/bin/nvcc` explicitly in cmake configure
 
 ### Incomplete cmake --install (Missing Targets Files)
-- Symptom: Entity cmake configure fails with "adios2 targets not found"
-- Trigger: ADIOS2 `cmake --install` sometimes skips c/cxx targets export files
-- Fix: After `cmake --install`, verify and manually copy if needed:
-  ```bash
-  # Check what's missing
-  ls <prefix>/lib64/cmake/adios2/adios2-targets-*.cmake
-  # If missing, copy from build tree
-  cp <build_dir>/adios2-targets-*.cmake <prefix>/lib64/cmake/adios2/
-  ```
-  The required files are: `adios2-targets.cmake`, `adios2-targets-release.cmake`,
-  `adios2-c-targets.cmake`, `adios2-c-targets-release.cmake`,
-  `adios2-cxx-targets.cmake`, `adios2-cxx-targets-release.cmake`.
+- Symptom: Entity cmake configure fails with "adios2 targets not found", or `cmake --install` exits non-zero
+- Trigger: ADIOS2 `cmake --install` attempts to install ALL targets including tools (`adios2_remote_server`, `bpls`, etc.). On login nodes without `libcuda.so.1`, tool targets fail to link, and the install step is all-or-nothing.
+- Fix: The generated build script now passes `-DADIOS2_BUILD_TOOLS=OFF` to skip tools entirely. Entity only needs the libraries (libadios2_core.so, libadios2_c.so, libadios2_cxx.so), not the CLI tools.
 
 ### GCC libstdc++ ABI Version Mismatch
 - Symptom: `undefined reference to std::__cxx11::...` during ADIOS2 link

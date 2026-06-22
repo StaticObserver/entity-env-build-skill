@@ -7,7 +7,7 @@ needs updating — scripts pick up the change through their imports.
 references/json-contracts.md is the human-readable mirror of this file.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
 # Version profiles (moved from _version_profile.py)
@@ -179,9 +179,53 @@ COMPILER_MIN_VERSIONS: CompilerMinVersions = {
 MIN_CMAKE_VERSION = (3, 16)
 
 
+# ---------------------------------------------------------------------------
+# Known-bad compiler versions — blacklist that triggers WARN before build
+# ---------------------------------------------------------------------------
+
+CompilerKnownBad = Dict[str, List[Tuple[int, int, int]]]
+
+COMPILER_KNOWN_BAD: CompilerKnownBad = {
+    "gcc": [
+        (12, 2, 0),  # ICE: internal compiler error in tsubst_copy (cp/pt.cc:17004)
+                      # Trigger: if constexpr in template code, Entity 1.4.3+ framework
+                      # Fix: use GCC 13.3+ or 11.x
+    ],
+}
+
+
 def version_satisfies(actual: tuple, minimum: tuple) -> bool:
     """Check if *actual* version tuple satisfies *minimum* version tuple."""
     return actual >= minimum
+
+
+# ---------------------------------------------------------------------------
+# Compat check override map — decisions overrides that downgrade fail→warn
+# ---------------------------------------------------------------------------
+
+# Map compat check IDs → decisions override field names.
+# When a compat check fails but user has explicitly acknowledged the risk,
+# the matching decisions entry downgrades failure to a warning.
+# Override value must be truthy (non-empty string, true bool, or dict with
+# confirmed_at/value/source).
+COMPAT_OVERRIDE_MAP: Dict[str, str] = {
+    "compiler.version.nvcc": "nvcc_version_override",
+}
+
+
+def override_satisfies(override_value: Any) -> bool:
+    """Check whether a decisions override entry is valid (user confirmed)."""
+    if override_value is None:
+        return False
+    if isinstance(override_value, bool):
+        return override_value
+    if isinstance(override_value, dict):
+        return bool(
+            override_value.get("value")
+            or override_value.get("confirmed_at")
+            or override_value.get("source")
+        )
+    return bool(override_value)
 
 
 # ---------------------------------------------------------------------------

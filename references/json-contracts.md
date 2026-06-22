@@ -286,6 +286,30 @@ MPI-specific selected fields:
 }
 ```
 
+## Decisions Overrides
+
+Users may acknowledge known compatibility-check deviations via `decisions` overrides. An override entry in `entity-deps.local.json.decisions` tells `entity_compat.py` to downgrade a specific FAIL check to WARN, allowing the build to proceed.
+
+```json
+{
+  "decisions": {
+    "nvcc_version_override": {
+      "value": "accept nvcc 12.0 for 12.2 requirement",
+      "source": "user",
+      "confirmed_at": "2026-06-22T00:00:00Z",
+      "reason": "CUDA 12.0 is the only available toolkit on this node"
+    }
+  }
+}
+```
+
+Override keys are mapped to compat check IDs in `entity_schema.py:COMPAT_OVERRIDE_MAP`. An override is valid when its value is truthy (non-empty string, true bool, or dict with `value`/`confirmed_at`/`source`).
+
+Current override map:
+| Check ID | Override Key |
+|----------|--------------|
+| `compiler.version.nvcc` | `nvcc_version_override` |
+
 ## Compatibility Result
 
 `compatibility.status=pass` requires:

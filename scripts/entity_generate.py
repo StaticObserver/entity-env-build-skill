@@ -179,8 +179,27 @@ def _kokkos_arch_to_cuda(arch: str) -> str:
 # ===========================================================================
 
 
+def _git_clone_fallback(dep: str, repo_url: str, branch_ref: str) -> str:
+    """Generate git clone block with tarball fallback for when network is down."""
+    dep_upper = dep.upper()
+    fallback = f"""  git clone --depth 1 --branch {branch_ref} {repo_url} "$SRC" || {{
+    TARBALL="${{ENTITY_SOURCE_TARBALL_DIR:-}}/{dep}-$VERSION.tar.gz"
+    if [ -n "${{ENTITY_SOURCE_TARBALL_DIR:-}}" ] && [ -f "$TARBALL" ]; then
+      echo "git clone failed, extracting from tarball: $TARBALL"
+      rm -rf "$SRC"
+      mkdir -p "$SRC"
+      tar xf "$TARBALL" -C "$SRC" --strip-components=1
+    else
+      echo "ERROR: git clone of {dep} failed. Set ENTITY_SOURCE_TARBALL_DIR or ensure network access."
+      echo "Expected tarball: ${{ENTITY_SOURCE_TARBALL_DIR:-}}/{dep}-$VERSION.tar.gz"
+      exit 1
+    fi
+  }}"""
+    return fallback
+
+
 def script_header(name: str, workdir: Path, pgen_dir: Path, prefix: Path,
-                  compilers: Dict[str, str]) -> str:
+                  compilers: Dict[str, str], tarball_dir: str = "") -> str:
     build_artifacts_dir = pgen_dir / "_build"
     lines = [
         "#!/usr/bin/env bash",
@@ -206,11 +225,16 @@ def script_header(name: str, workdir: Path, pgen_dir: Path, prefix: Path,
             lines.append(f"export {key}={q(compilers[key])}")
     if compilers.get("HOST_CXX") and "nvcc_wrapper" in Path(compilers.get("CXX", "")).name:
         lines.append(f"export NVCC_WRAPPER_DEFAULT_COMPILER={q(compilers['HOST_CXX'])}")
+    if tarball_dir:
+        lines.append(f"export ENTITY_SOURCE_TARBALL_DIR={q(tarball_dir)}")
+        lines.append('if [ ! -d "${ENTITY_SOURCE_TARBALL_DIR}" ]; then')
+        lines.append('  echo "WARNING: ENTITY_SOURCE_TARBALL_DIR does not exist: ${ENTITY_SOURCE_TARBALL_DIR}"')
+        lines.append("fi")
     lines.append("")
     return "\n".join(lines)
 
 
-def _kokkos_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+def _kokkos_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path, tarball_dir: str = "") -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     profile = entity_version_profile(req)
@@ -245,13 +269,13 @@ fi
 export CXX="$SRC/bin/nvcc_wrapper"
 """
     return (
-        script_header("kokkos", workdir, pgen_dir, prefix, compilers)
+        script_header("kokkos", workdir, pgen_dir, prefix, compilers, tarball_dir)
         + f"""
 VERSION="${{KOKKOS_VERSION:-{version}}}"
 SRC="$SRC_ROOT/kokkos-$VERSION"
 BUILD="$BUILD_ROOT/kokkos-$VERSION"
 if [ ! -d "$SRC/.git" ]; then
-  git clone --depth 1 --branch "$VERSION" https://github.com/kokkos/kokkos.git "$SRC"
+{_git_clone_fallback("kokkos", "https://github.com/kokkos/kokkos.git", '"$VERSION"')}
 fi
 {cuda_wrapper_block}
 cmake -S "$SRC" -B "$BUILD" \\
@@ -262,7 +286,7 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/kokkos-install.log"
     )
 
 
-def _hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+def _hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path, tarball_dir: str = "") -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     version = requested_version(req, "hdf5", entity_version_profile(req))
@@ -271,13 +295,13 @@ def _hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path)
     mpi_on = bool(env.get("mpi")) if isinstance(env, dict) else False
     parallel = "-DHDF5_ENABLE_PARALLEL=ON" if mpi_on else "-DHDF5_ENABLE_PARALLEL=OFF"
     return (
-        script_header("hdf5", workdir, pgen_dir, prefix, compilers)
+        script_header("hdf5", workdir, pgen_dir, prefix, compilers, tarball_dir)
         + f"""
 VERSION="${{HDF5_VERSION:-{version}}}"
 SRC="$SRC_ROOT/hdf5-$VERSION"
 BUILD="$BUILD_ROOT/hdf5-$VERSION"
 if [ ! -d "$SRC/.git" ]; then
-  git clone --depth 1 --branch "hdf5_$VERSION" https://github.com/HDFGroup/hdf5.git "$SRC"
+{_git_clone_fallback("hdf5", "https://github.com/HDFGroup/hdf5.git", '"hdf5_$VERSION"')}
 fi
 cmake -S "$SRC" -B "$BUILD" \\
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \\
@@ -289,7 +313,7 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/hdf5-install.log"
     )
 
 
-def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
+def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path, tarball_dir: str = "") -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
     profile = entity_version_profile(req)
@@ -347,11 +371,12 @@ export CMAKE_SHARED_LINKER_FLAGS="-L{stubs_path} -L{cuda_lib_path} ${{CMAKE_SHAR
         "-DADIOS2_USE_HDF5=ON",
         f"-DADIOS2_HAVE_HDF5_VOL={'ON' if mpi_on else 'OFF'}",
         f"-DADIOS2_USE_Kokkos={'ON' if profile['adios2_uses_kokkos'] else 'OFF'}",
+        "-DADIOS2_BUILD_TOOLS=OFF",
         "-DADIOS2_USE_CUDA=ON" if backend == "cuda" and not profile["adios2_uses_kokkos"] else "",
     ]
     opts = [opt for opt in opts if opt]
     return (
-        script_header("adios2", workdir, pgen_dir, prefix, compilers)
+        script_header("adios2", workdir, pgen_dir, prefix, compilers, tarball_dir)
         + f"""
 VERSION="${{ADIOS2_VERSION:-v{version}}}"
 SRC="$SRC_ROOT/ADIOS2-$VERSION"
@@ -359,7 +384,7 @@ BUILD="$BUILD_ROOT/ADIOS2-$VERSION"
 CMAKE_PREFIX_PATH_BASE={q(cmake_prefix_base)}
 export CMAKE_PREFIX_PATH="${{CMAKE_PREFIX_PATH_BASE}}${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
 if [ ! -d "$SRC/.git" ]; then
-  git clone --depth 1 --branch "$VERSION" https://github.com/ornladios/ADIOS2.git "$SRC"
+{_git_clone_fallback("adios2", "https://github.com/ornladios/ADIOS2.git", '"$VERSION"')}
 fi
 {cuda_extra}
 cmake -S "$SRC" -B "$BUILD" \\
@@ -422,8 +447,9 @@ def cmd_deps(args: argparse.Namespace) -> None:
     scripts: Dict[str, Dict[str, str]] = {}
     profile = entity_version_profile(req)
     generated: List[str] = []
+    tarball_dir = getattr(args, 'source_tarball_dir', "") or ""
     for dep in dep_list(args.deps, req):
-        text = SCRIPT_FACTORIES[dep](req, checkpoint, workdir)
+        text = SCRIPT_FACTORIES[dep](req, checkpoint, workdir, tarball_dir)
         path = out_dir / f"build-{dep}.sh"
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
@@ -502,14 +528,16 @@ def dep_libs(selected: Dict[str, Any]) -> List[str]:
     return unique(libs)
 
 
+_NON_BLOCKING_STATUSES = {"pass", "warn"}
+
 def require_compatibility_pass(data: Dict[str, Any], allow_incomplete: bool) -> None:
     if allow_incomplete:
         return
     compatibility = data.get("compatibility", {})
     status = str(compatibility.get("status") or "") if isinstance(compatibility, dict) else ""
-    if status != "pass":
+    if status not in _NON_BLOCKING_STATUSES:
         raise SystemExit(
-            "entity-deps.local.json compatibility.status must be pass before env.sh generation "
+            f"entity-deps.local.json compatibility.status={status}, must be pass or warn. "
             "(use --allow-incomplete only for debugging)"
         )
 
@@ -643,7 +671,8 @@ _REQUIREMENTS_KEYS = ("entity", "environment", "compile")
 
 
 def _build_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
-                  dep: str, scripts_dir: Path, notes_dir: Path) -> str:
+                  dep: str, scripts_dir: Path, notes_dir: Path,
+                  remote: str = "") -> str:
     """Assemble Agent tool prompt for dependency source build."""
     profile = entity_version_profile(req)
     version = requested_version(req, dep, profile)
@@ -667,6 +696,24 @@ def _build_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
     check_ver = checkpoint.get("compatibility", {}).get("status", "unknown") \
         if isinstance(checkpoint.get("compatibility"), dict) else "unknown"
 
+    remote_section = ""
+    if remote:
+        remote_section = f"""
+=== REMOTE EXECUTION ===
+Build environment is on remote host: {remote}
+ALL commands MUST be run via SSH:
+  ssh {remote} "<command>"
+
+For bash scripts: save the BUILD SCRIPT to a temp file via SSH, then execute it:
+  ssh {remote} 'cat > /tmp/build-{dep}.sh' << 'ENDSCRIPT'
+<paste build script>
+ENDSCRIPT
+  ssh {remote} 'bash /tmp/build-{dep}.sh'
+
+For file checks:
+  ssh {remote} 'test -f /path/to/{dep}Config.cmake && echo FOUND || echo MISSING'
+"""
+
     return f"""{{
   "status": "success",
   "dep": "{dep}",
@@ -679,7 +726,7 @@ def _build_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
 }}
 
 Build {dep} {version} for Entity.
-
+{remote_section}
 === REQUIREMENTS (from requirements.json) ===
 {json.dumps(req_sections, indent=2)}
 
@@ -691,7 +738,7 @@ Build {dep} {version} for Entity.
 
 YOUR TASK:
 1. Study the KNOWN ISSUES section above — match any build errors against these.
-2. Execute the BUILD SCRIPT above using Bash.
+2. Execute the BUILD SCRIPT above using Bash{", via SSH to " + remote if remote else ""}.
 3. Validate: check that {dep}Config.cmake or equivalent exists in the install prefix.
 
 IF BUILD FAILS:
@@ -711,11 +758,27 @@ Compiler: CXX={compilers.get('CXX', '')} CC={compilers.get('CC', '')}
 """
 
 
-def _compat_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any]) -> str:
+def _compat_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
+                   remote: str = "") -> str:
     """Assemble Agent tool prompt for compatibility verification."""
+    remote_instructions = ""
+    if remote:
+        remote_instructions = f"""
+=== REMOTE EXECUTION ===
+All commands MUST run on remote host: {remote}
+  ssh {remote} "<command>"
+
+For the compat script, scp the JSON files to remote first, then run:
+  scp <req-path> {remote}:/tmp/entity-req.json
+  scp <deps-path> {remote}:/tmp/entity-deps.json
+  ssh {remote} 'python3 /path/to/scripts/entity_compat.py /tmp/entity-req.json --checkpoint /tmp/entity-deps.json --no-update-json'
+
+File path checks: ssh {remote} 'test -f <path> && echo FOUND'
+"""
+
     return f"""You are verifying dependency compatibility for an Entity build.
 You have a clean context with no prior knowledge of these files.
-
+{remote_instructions}
 === REQUIREMENTS JSON ===
 {json.dumps(req, indent=2)}
 
@@ -724,9 +787,9 @@ You have a clean context with no prior knowledge of these files.
 
 YOUR TASK:
 1. Read BOTH JSONs above — they are already in your context, no file reads needed.
-2. Run: python3 scripts/entity_compat.py <req-path> --checkpoint <deps-path> --no-update-json
+2. Run: python3 scripts/entity_compat.py <req-path> --checkpoint <deps-path> --no-update-json{", via SSH to " + remote if remote else ""}.
 3. For each FAIL/WARN, independently verify by checking file paths on disk
-   (use Bash: ls, test -f, test -d).
+   (use Bash: ls, test -f, test -d{", via SSH to " + remote if remote else ""}).
 4. Return structured verdict:
 
 {{
@@ -747,8 +810,10 @@ def cmd_subagent(args: argparse.Namespace) -> None:
     req = load_json(args.requirements_json)
     checkpoint = load_json(args.checkpoint)
 
+    remote = getattr(args, 'remote', "") or ""
+
     if args.mode == "compat":
-        prompt = _compat_prompt(req, checkpoint)
+        prompt = _compat_prompt(req, checkpoint, remote)
     else:
         if not args.dep:
             raise SystemExit("--dep is required for build mode (kokkos, hdf5, or adios2)")
@@ -760,7 +825,7 @@ def cmd_subagent(args: argparse.Namespace) -> None:
         notes_dir = args.notes_dir or (
             Path(__file__).resolve().parent.parent / "references" / "dependency-notes"
         )
-        prompt = _build_prompt(req, checkpoint, dep, Path(scripts_dir), Path(notes_dir))
+        prompt = _build_prompt(req, checkpoint, dep, Path(scripts_dir), Path(notes_dir), remote)
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -864,9 +929,9 @@ def _verify_checkpoint_gate(checkpoint: Dict[str, Any], env_sh: Path) -> None:
     compat = checkpoint.get("compatibility", {})
     if not isinstance(compat, dict):
         raise SystemExit("entity-deps.local.json missing compatibility section")
-    if compat.get("status") != "pass":
+    if compat.get("status") not in _NON_BLOCKING_STATUSES:
         raise SystemExit(
-            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass'. "
+            f"entity-deps.local.json compatibility.status={compat.get('status')}, must be 'pass' or 'warn'. "
             f"Run entity_compat.py first."
         )
     checkpoint_env = checkpoint.get("env_sh", {})
@@ -885,7 +950,8 @@ def shell_command(parts: List[str]) -> str:
 
 
 def generate_build_script(
-    req: Dict[str, Any], req_path: Path, env_sh: Path, run_id: str
+    req: Dict[str, Any], req_path: Path, env_sh: Path, run_id: str,
+    clean_build: bool = False,
 ) -> Tuple[str, Dict[str, str]]:
     checkout = require_string(req, "entity.checkout_root")
     workdir = require_string(req, "entity.workdir")
@@ -914,13 +980,19 @@ def generate_build_script(
         f"LOG_DIR={q(log_dir)}",
         "mkdir -p \"$LOG_DIR\"",
         f"cd {q(checkout)}",
+    ]
+    if clean_build:
+        lines.append(f"rm -rf {q(build_dir)}")
+        lines.append("echo 'Cleaned previous build tree'")
+    lines.extend([
+        f'TS=$(date -u +%Y%m%dT%H%M%SZ)',
         "# -- cmake configure --",
-        f"{configure_cmd} 2>&1 | tee \"$LOG_DIR/entity-configure.log\"",
+        f"{configure_cmd} 2>&1 | tee \"$LOG_DIR/entity-configure-$TS.log\"",
         f"echo '{{\"ts\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"run\":{run_id_q},\"action\":\"build.configure\",\"script\":\"entity-build.sh\",\"status\":\"ok\"}}' >> ~/.entity-env-build/run.log",
         "# -- cmake build --",
-        f"{shell_command(build_parts)} 2>&1 | tee \"$LOG_DIR/entity-build.log\"",
+        f"{shell_command(build_parts)} 2>&1 | tee \"$LOG_DIR/entity-build-$TS.log\"",
         f"echo '{{\"ts\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"run\":{run_id_q},\"action\":\"build.compile\",\"script\":\"entity-build.sh\",\"status\":\"ok\"}}' >> ~/.entity-env-build/run.log",
-    ]
+    ])
     if compile_cfg.get("tests"):
         lines.append(shell_command(["ctest", "--test-dir", build_dir, "--output-on-failure"]))
     if compile_cfg.get("install"):
@@ -974,7 +1046,8 @@ def cmd_build(args: argparse.Namespace) -> None:
             workdir = require_string(req, "entity.workdir")
             args.output = get_build_artifacts_dir(req) / "entity-build.sh"
 
-    script, meta = generate_build_script(req, args.requirements_json, args.env, run_id)
+    script, meta = generate_build_script(req, args.requirements_json, args.env, run_id,
+                                          clean_build=args.clean_build)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(script, encoding="utf-8")
     args.output.chmod(0o755)
@@ -1025,6 +1098,9 @@ def main() -> None:
     p_deps.add_argument("--checkpoint", type=Path, required=True)
     p_deps.add_argument("--deps", help="Comma-separated deps: mpi,kokkos,hdf5,adios2")
     p_deps.add_argument("--output-dir", type=Path)
+    p_deps.add_argument("--source-tarball-dir",
+                        help="Directory with dependency source tarballs (e.g., kokkos-4.5.0.tar.gz). "
+                             "Used as fallback when git clone fails.")
     p_deps.add_argument("--no-update-json", action="store_true")
     add_json_flag(p_deps)
 
@@ -1042,6 +1118,8 @@ def main() -> None:
     p_build.add_argument("--env", type=Path, required=True)
     p_build.add_argument("--checkpoint", type=Path, help="entity-deps.local.json for gate validation")
     p_build.add_argument("--output", type=Path)
+    p_build.add_argument("--clean-build", action="store_true",
+                         help="Remove build tree before cmake configure (disables incremental build)")
     p_build.add_argument("--no-update-json", action="store_true")
     p_build.add_argument("--run-id", help="Run ID for event log (auto-generated if omitted)")
     add_json_flag(p_build)
@@ -1060,6 +1138,9 @@ def main() -> None:
                             help="Path to deps/scripts (default: auto-detect)")
     p_subagent.add_argument("--output", type=Path,
                             help="Write prompt to file (default: stdout)")
+    p_subagent.add_argument("--remote",
+                            help="Remote host for execution (e.g., user@host). "
+                                 "Generated prompt includes SSH wrapping instructions.")
     add_json_flag(p_subagent)
 
     args = parser.parse_args()

@@ -51,7 +51,7 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 - Require two explicit locations before writing artifacts: `ENTITY_CHECKOUT` for the Entity source tree and `ENTITY_WORKDIR` for this problem/build workspace. If either is missing or invalid, ask the user to confirm.
 - Keep generated control files and build artifacts out of the source checkout by default; write them under `ENTITY_WORKDIR`.
 - Write the current request to `requirements.json` before using or repairing environment checkpoints.
-- Default dependency policy is local/system reuse first; no Spack or Docker unless the user explicitly asks.
+- Default dependency policy for C++ compilers and libraries: system modules/packages first, then Spack, then source-build. Do not use conda for C++ build tools — conda's libstdc++ and linker configuration cause subtle ABI issues. Python environment: conda is the first and recommended choice.
 - Core dependencies are always `CMake`, a C++ compiler, and `Kokkos`.
 - Use `MPI` only when the current request requires parallel/multi-process or multi-node builds.
 - Use output support by default. When `requirements.environment.output=true`, require `ADIOS2 + HDF5`.
@@ -62,7 +62,7 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 - For source builds, generate local scripts with `scripts/entity_generate.py deps`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
 - Do not enter Entity source compilation until compatibility is `pass` and `env.sh` is generated from `entity-deps.local.json`.
 - Do not hand-write the Entity configure/build commands. Generate `entity-build.sh` from `requirements.json` and `env.sh`, then execute it.
-- On clusters: NEVER compile on login nodes. Always submit Entity builds through the scheduler (SLURM/PBS), or ask the user if no scheduler is available. The only exception is when the user explicitly requests a login-node build.
+- On clusters: NEVER compile on login nodes. Always submit Entity builds through the scheduler (SLURM/PBS), or ask the user if no scheduler is available. The only exception is when the user explicitly requests a login-node build, and for GPU backends this requires TWO explicit confirmations: (1) acknowledge that libcuda.so.1 is unavailable on login nodes, which will cause ADIOS2 tools to fail linking unless `-DADIOS2_BUILD_TOOLS=OFF` is set; (2) acknowledge that the build may not be runnable on login nodes. Show the login-vs-compute difference table before asking.
 
 ## Build Workflow
 
