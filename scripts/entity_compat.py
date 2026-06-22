@@ -17,10 +17,31 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from _json_io import add_json_flag, load_json, protocol_error, protocol_ok, write_json_atomic
 from _version_profile import profile_for, detect_profile_name
+from entity_state import record_step
 from entity_schema import COMPILER_MIN_VERSIONS, MIN_CMAKE_VERSION, COMPAT_OVERRIDE_MAP, override_satisfies, version_satisfies, COMPILER_KNOWN_BAD
 
 
 SUPPORTED_SCHEMA_VERSION = 1
+CHECKER_VERSION = 1
+
+
+def compatibility_coverage() -> Dict[str, str]:
+    """Return the implemented coverage map for the compatibility contract."""
+    return {
+        "schema_version": "implemented",
+        "requirements_checkpoint_match": "implemented",
+        "dependency_path_existence": "implemented",
+        "compiler_executable": "implemented",
+        "version_profile": "implemented",
+        "cuda_nvcc_wrapper": "implemented",
+        "adios2_kokkos_profile": "implemented",
+        "source_build_install_evidence": "implemented",
+        "compiler_signature": "partial",
+        "gpu_arch_match": "partial",
+        "mpi_output_mode": "partial",
+        "path_list_existence": "not_implemented",
+        "cmake_package_probe": "not_implemented",
+    }
 
 
 def add(
@@ -1079,7 +1100,9 @@ def main() -> None:
     status, checks, issues = run_checks(req, checkpoint)
     compatibility = {
         "status": status,
+        "checker_version": CHECKER_VERSION,
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "coverage": compatibility_coverage(),
         "checks": checks,
         "issues": issues,
     }
@@ -1093,6 +1116,17 @@ def main() -> None:
             env_generated = isinstance(env_sh, dict) and env_sh.get("status") == "generated"
             status_section["ready_for_entity_build"] = status == "pass" and env_generated
         write_json_atomic(args.checkpoint, checkpoint)
+        record_step(
+            args.checkpoint.parent,
+            "compatibility_checked",
+            status,
+            inputs={
+                "requirements_json": str(args.requirements_json.resolve()),
+                "checkpoint_json": str(args.checkpoint.resolve()),
+            },
+            outputs={"checkpoint_json": str(args.checkpoint.resolve())},
+            message=f"{len(issues)} issue(s)",
+        )
 
     if args.json:
         if status != "pass":

@@ -332,6 +332,99 @@ class HardGateTests(unittest.TestCase):
             self.assertIn("consistency.requirements_embedded", proc.stdout)
             self.assertIn("environment.backend", proc.stdout)
 
+    def test_compat_result_includes_coverage_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            req = self.base_requirements(tmp)
+            req_path = tmp / "requirements.json"
+            deps_path = tmp / "entity-deps.local.json"
+            self.write_json(req_path, req)
+            self.write_json(
+                deps_path,
+                {
+                    "schema_version": 1,
+                    "requirements": {"embedded": {
+                        "entity": {
+                            "checkout_root": req["entity"]["checkout_root"],
+                            "workdir": req["entity"]["workdir"],
+                            "version_bucket": req["entity"]["version_bucket"],
+                            "dependency_profile": req["entity"]["dependency_profile"],
+                        },
+                        "environment": {
+                            "backend": "cpu",
+                            "output": False,
+                            "mpi": False,
+                            "gpu_aware_mpi": False,
+                        },
+                        "compile": {
+                            "pgen": "smoke",
+                            "pgens": "",
+                            "cxx_standard": "20",
+                            "precision": "",
+                            "deposit": "",
+                            "shape_order": "",
+                            "debug": False,
+                            "tests": False,
+                            "build_intent": "",
+                        },
+                    }},
+                    "entity": {
+                        "checkout_root": req["entity"]["checkout_root"],
+                        "workdir": req["entity"]["workdir"],
+                        "version_bucket": req["entity"]["version_bucket"],
+                        "dependency_profile": req["entity"]["dependency_profile"],
+                    },
+                    "selected": {
+                        "compiler": {"cxx": sys.executable},
+                        "kokkos": {"prefix": str(tmp), "version": "5.0.0"},
+                        "adios2": {
+                            "prefix": str(tmp),
+                            "version": "2.11.0",
+                            "compile_config": {"ADIOS2_USE_Kokkos": True},
+                        },
+                    },
+                    "compatibility": {"status": "unknown"},
+                    "env_sh": {"status": "missing"},
+                },
+            )
+
+            proc = run_cmd(
+                "scripts/entity_compat.py",
+                str(req_path),
+                "--checkpoint",
+                str(deps_path),
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            data = json.loads(deps_path.read_text(encoding="utf-8"))
+            compat = data["compatibility"]
+            self.assertEqual(compat["checker_version"], 1)
+            self.assertEqual(compat["coverage"]["requirements_checkpoint_match"], "implemented")
+            self.assertIn("cmake_package_probe", compat["coverage"])
+
+    def test_compat_prompt_requires_file_reads_and_hashes(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            req_path = tmp / "requirements.json"
+            deps_path = tmp / "entity-deps.local.json"
+            self.write_json(req_path, self.base_requirements(tmp))
+            self.write_json(deps_path, {"schema_version": 1, "selected": {}})
+
+            proc = run_cmd(
+                "scripts/entity_generate.py",
+                "subagent",
+                str(req_path),
+                "--checkpoint",
+                str(deps_path),
+                "--mode",
+                "compat",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("requirements_sha256", proc.stdout)
+            self.assertIn("Read both JSON files from disk", proc.stdout)
+            self.assertNotIn("no file reads needed", proc.stdout)
+
     def test_run_build_records_success(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -360,6 +453,8 @@ class HardGateTests(unittest.TestCase):
             self.assertEqual(data["build_result"]["status"], "pass")
             self.assertEqual(data["build_result"]["exit_code"], 0)
             self.assertTrue(Path(data["build_result"]["runner_log"]).is_file())
+            state = json.loads((tmp / ".entity-session.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["steps"]["build_executed"]["status"], "pass")
 
     def test_run_build_records_failure(self):
         with tempfile.TemporaryDirectory() as td:
@@ -389,6 +484,8 @@ class HardGateTests(unittest.TestCase):
             self.assertEqual(data["build_result"]["status"], "fail")
             self.assertEqual(data["build_result"]["exit_code"], 3)
             self.assertTrue(Path(data["build_result"]["runner_log"]).is_file())
+            state = json.loads((tmp / ".entity-session.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["steps"]["build_executed"]["status"], "fail")
 
 
 if __name__ == "__main__":

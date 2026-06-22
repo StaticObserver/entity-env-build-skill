@@ -16,6 +16,10 @@ Use this reference when creating, repairing, or validating `requirements.json` a
 
 Do not reconstruct state from chat history or transient shell variables when these files exist.
 
+`.entity-session.json` is auxiliary build-run state beside these artifacts. It
+records main-chain progress, but it is not a replacement for the core JSON and
+generated shell artifacts.
+
 ## Path Roles
 
 Require these locations before writing artifacts:
@@ -40,7 +44,7 @@ $ENTITY_WORKDIR/                          ← ROOT
         └── _build/                       ← tool-generated artifacts
             ├── requirements.json
             ├── entity-deps.local.json
-            ├── .entity-session.json
+            ├── .entity-session.json          ← auxiliary build-run state
             ├── env.sh
             ├── entity-build.sh
             ├── build-logs/
@@ -345,6 +349,31 @@ Generation commands still require `--allow-warnings`; by default only
 
 Use `partial` only for non-blocking issues explicitly safe before Entity build.
 By default, `partial` and `warn` are blocking for generated artifacts.
+
+The compatibility result also records checker coverage. Coverage explains what
+the current checker proved; it does not create a new pass path:
+
+```json
+{
+  "compatibility": {
+    "status": "pass",
+    "checker_version": 1,
+    "checked_at": "",
+    "coverage": {
+      "requirements_checkpoint_match": "implemented",
+      "dependency_path_existence": "implemented",
+      "compiler_signature": "partial",
+      "path_list_existence": "not_implemented",
+      "cmake_package_probe": "not_implemented"
+    },
+    "checks": [],
+    "issues": []
+  }
+}
+```
+
+Required checks marked `partial` or `not_implemented` should be treated as known
+limitations, not silently folded into a complete proof.
 
 Run:
 
