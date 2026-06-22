@@ -49,21 +49,13 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 
 - Treat the current user request as the first input. Old JSON is reusable only if it satisfies this request.
 - Require two explicit locations before writing artifacts: `ENTITY_CHECKOUT` for the Entity source tree and `ENTITY_WORKDIR` for this problem/build workspace. If either is missing or invalid, ask the user to confirm.
-- Keep generated control files and build artifacts out of the source checkout by default; write them under `ENTITY_WORKDIR`.
 - Write the current request to `requirements.json` before using or repairing environment checkpoints.
-- Default dependency policy for C++ compilers and libraries: system modules/packages first, then Spack, then source-build. Do not use conda for C++ build tools — conda's libstdc++ and linker configuration cause subtle ABI issues. Python environment: conda is the first and recommended choice.
-- Core dependencies are always `CMake`, a C++ compiler, and `Kokkos`.
-- Use `MPI` only when the current request requires parallel/multi-process or multi-node builds.
-- Use output support by default. When `requirements.environment.output=true`, require `ADIOS2 + HDF5`.
+- Core dependencies are always `CMake`, a C++ compiler, and `Kokkos`. Add `MPI` only when the current request requires parallel/multi-process builds; add `ADIOS2 + HDF5` only when `output=true` (the default).
 - Unless the user explicitly accepts the risk, all dependencies must use one consistent, non-conflicting compiler/toolchain.
-- Entity `1.4.0` and newer require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; versions before `1.4.0` use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`.
-- Entity versions **before `1.4.3` are not compatible with CUDA backend + modern profile (C++20)**. NVCC's EDG frontend rejects C++20 `requires` constraints in `metadomain_reshape.cpp` (`constraints on a non-templated function`). Entity `1.4.3` (PR #210) replaced `requires` with `static_assert`, fixing this. A second NVCC+EDG bug exists in bundled TOML11: `std::source_location::current` consteval fails with GCC 12.x host (`call to consteval function did not produce a valid constant expression`); workaround is `-DCMAKE_CXX_FLAGS="-UTOML11_HAS_STD_SOURCE_LOCATION"`, but upgrading Entity is the real fix since both bugs must be resolved.
-- Only the `Kokkos 5.x + ADIOS2 2.11.x` profile builds ADIOS2 with Kokkos support. Other profiles must not add Kokkos as an ADIOS2 dependency unless the user explicitly overrides the profile.
-- For CUDA backend builds, use Kokkos `nvcc_wrapper` as the C++ compiler, usually from `Kokkos source/install prefix/bin/nvcc_wrapper`. Record both wrapper path and host compiler.
-- For source builds, generate local scripts with `scripts/entity_generate.py deps`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
+- Entity `1.4.0` and newer require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; versions before `1.4.0` use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`. Entity versions before `1.4.3` are not compatible with CUDA backend — upgrade to ≥1.4.3. Full profile and compatibility details are in `references/json-contracts.md`, `references/compatibility-check.md`, and `references/dependency-policy.md`.
 - Do not enter Entity source compilation until compatibility is `pass` and `env.sh` is generated from `entity-deps.local.json`.
 - Do not hand-write the Entity configure/build commands. Generate `entity-build.sh` from `requirements.json` and `env.sh`, then execute it.
-- On clusters: NEVER compile on login nodes. Always submit Entity builds through the scheduler (SLURM/PBS), or ask the user if no scheduler is available. The only exception is when the user explicitly requests a login-node build, and for GPU backends this requires TWO explicit confirmations: (1) acknowledge that libcuda.so.1 is unavailable on login nodes, which will cause ADIOS2 tools to fail linking unless `-DADIOS2_BUILD_TOOLS=OFF` is set; (2) acknowledge that the build may not be runnable on login nodes. Show the login-vs-compute difference table before asking.
+- On clusters: never compile on login nodes. Submit Entity builds through the scheduler (SLURM/PBS), or ask the user if no scheduler is available. For GPU backends, login-node builds require two explicit confirmations: (1) `libcuda.so.1` is absent on login nodes; (2) the build may not be runnable there. Show the login-vs-compute difference before asking.
 
 ## Build Workflow
 
