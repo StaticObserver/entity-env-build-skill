@@ -1,31 +1,101 @@
 # entity-env-build-skill
 
-`entity-env-build` prepares and verifies an Entity build environment, then generates and runs the Entity build script from structured artifacts.
+## 中文
 
-Core chain:
+`entity-env-build` 是一个用于构建 Entity 项目环境与本体的 Codex skill。它把一次 Entity 编译拆成三个阶段：
+
+1. 确认当前构建需求并生成 `requirements.json`。
+2. 搜索、选择、检查本地依赖，生成 `entity-deps.local.json` 和 `env.sh`。
+3. 根据 `requirements.json + env.sh` 生成并执行 `entity-build.sh`。
+
+核心约束：
+
+- 默认复用本地/system 依赖，不使用 Spack 或 Docker，除非用户明确要求。
+- 所有依赖默认使用一致的编译器/toolchain。
+- CUDA 后端使用 Kokkos `nvcc_wrapper`。
+- Entity `1.4.0` 之前版本使用 `C++17 + Kokkos 4.x + ADIOS2 2.10.x`。
+- Entity `1.4.0` 及更新版本使用 `C++20 + Kokkos 5.x + ADIOS2 2.11.x`。
+- 只有 `Kokkos 5.x + ADIOS2 2.11.x` profile 启用 ADIOS2 Kokkos 支持。
+- `env.sh` 只能在 compatibility check 通过后生成。
+
+主要脚本：
 
 ```text
-requirements.json
-  -> entity-deps.local.json
-  -> entity_compat.py
-  -> env.sh
-  -> entity-build.sh
-  -> entity_run.py build result
+scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_checkpoint.py   ← record-install dependency evidence
+scripts/entity_compat.py       ← compatibility check
+scripts/entity_generate.py     ← deps / env / build 生成
+scripts/entity_run.py          ← run build scripts + record results
 ```
 
-Authoritative behavior lives in:
-
-- `SKILL.md` for agent workflow and hard rules.
-- `scripts/entity_schema.py` for schema constants, defaults, version profiles, and CMake option maps.
-- `references/json-contracts.md` for human-readable artifact contracts.
-- `references/compatibility-check.md` for compatibility coverage.
-
-## Main Commands
-
-Use a pgen/build-run artifact directory such as:
+典型顺序：
 
 ```bash
-BUILD_ARTIFACTS_DIR="$ENTITY_WORKDIR/problems/<pgen>/_build"
+# Phase 1: Validate requirements
+python3 scripts/entity_checkpoint.py validate "$ENTITY_WORKDIR/requirements.json"
+
+# Phase 2: Create checkpoint
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Dependency source-build scripts (if needed)
+python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Record a completed source-build install (example)
+python3 scripts/entity_checkpoint.py record-install \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --dep kokkos \
+  --prefix "$ENTITY_WORKDIR/deps/kokkos/5.0.1" \
+  --cmake-config "$ENTITY_WORKDIR/deps/kokkos/5.0.1/lib64/cmake/Kokkos/KokkosConfig.cmake"
+
+# Compatibility check
+python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Generate env.sh
+python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/env.sh"
+
+# Phase 3: Generate entity-build.sh
+python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
+  --env "$ENTITY_WORKDIR/env.sh" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/entity-build.sh"
+
+# Run generated build script and update build_result
+python3 scripts/entity_run.py build "$ENTITY_WORKDIR/requirements.json" \
+  --script "$ENTITY_WORKDIR/entity-build.sh"
+```
+
+详细契约见 `SKILL.md` 和 `references/`。
+
+## English
+
+`entity-env-build` is a Codex skill for preparing an Entity build environment and building Entity itself. It splits one Entity build into three phases:
+
+1. Confirm the current build requirements and write `requirements.json`.
+2. Discover, select, and validate local dependencies, then write `entity-deps.local.json` and `env.sh`.
+3. Generate and run `entity-build.sh` from `requirements.json + env.sh`.
+
+Core constraints:
+
+- Reuse local/system dependencies by default; do not use Spack or Docker unless explicitly requested.
+- Keep all dependencies on one consistent compiler/toolchain unless the user accepts the risk.
+- CUDA builds use Kokkos `nvcc_wrapper`.
+- Entity versions before `1.4.0` use `C++17 + Kokkos 4.x + ADIOS2 2.10.x`.
+- Entity `1.4.0` and newer use `C++20 + Kokkos 5.x + ADIOS2 2.11.x`.
+- Enable ADIOS2 Kokkos support only for the `Kokkos 5.x + ADIOS2 2.11.x` profile.
+- Generate `env.sh` only after compatibility checks pass.
+
+Main scripts:
+
+```text
+scripts/entity_checkpoint.py   ← validate + create checkpoint
+scripts/entity_checkpoint.py   ← record-install dependency evidence
+scripts/entity_compat.py       ← compatibility check
+scripts/entity_generate.py     ← deps / env / build generation
+scripts/entity_run.py          ← run build scripts + record results
 ```
 
 Before these commands, the agent must present the compile configuration summary
@@ -35,42 +105,41 @@ old-checkpoint inspection start only after that confirmation.
 Typical sequence:
 
 ```bash
-python3 scripts/entity_checkpoint.py validate "$BUILD_ARTIFACTS_DIR/requirements.json"
+# Phase 1: Validate requirements
+python3 scripts/entity_checkpoint.py validate "$ENTITY_WORKDIR/requirements.json"
 
-python3 scripts/entity_checkpoint.py create "$BUILD_ARTIFACTS_DIR/requirements.json" \
-  --output "$BUILD_ARTIFACTS_DIR/entity-deps.local.json"
+# Phase 2: Create checkpoint
+python3 scripts/entity_checkpoint.py create "$ENTITY_WORKDIR/requirements.json" \
+  --output "$ENTITY_WORKDIR/entity-deps.local.json"
 
-python3 scripts/entity_compat.py "$BUILD_ARTIFACTS_DIR/requirements.json" \
-  --checkpoint "$BUILD_ARTIFACTS_DIR/entity-deps.local.json"
+# Dependency source-build scripts (if needed)
+python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
 
-python3 scripts/entity_generate.py env "$BUILD_ARTIFACTS_DIR/entity-deps.local.json" \
-  --output "$BUILD_ARTIFACTS_DIR/env.sh"
-
-python3 scripts/entity_generate.py build "$BUILD_ARTIFACTS_DIR/requirements.json" \
-  --env "$BUILD_ARTIFACTS_DIR/env.sh" \
-  --checkpoint "$BUILD_ARTIFACTS_DIR/entity-deps.local.json" \
-  --output "$BUILD_ARTIFACTS_DIR/entity-build.sh"
-
-python3 scripts/entity_run.py build "$BUILD_ARTIFACTS_DIR/requirements.json" \
-  --script "$BUILD_ARTIFACTS_DIR/entity-build.sh"
-```
-
-If a dependency must be source-built, generate the script and record install evidence:
-
-```bash
-python3 scripts/entity_generate.py deps "$BUILD_ARTIFACTS_DIR/requirements.json" \
-  --checkpoint "$BUILD_ARTIFACTS_DIR/entity-deps.local.json" \
-  --deps kokkos
-
+# Record a completed source-build install (example)
 python3 scripts/entity_checkpoint.py record-install \
-  --checkpoint "$BUILD_ARTIFACTS_DIR/entity-deps.local.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
   --dep kokkos \
-  --prefix /path/to/kokkos \
-  --cmake-config /path/to/KokkosConfig.cmake
+  --prefix "$ENTITY_WORKDIR/deps/kokkos/5.0.1" \
+  --cmake-config "$ENTITY_WORKDIR/deps/kokkos/5.0.1/lib64/cmake/Kokkos/KokkosConfig.cmake"
+
+# Compatibility check
+python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+
+# Generate env.sh
+python3 scripts/entity_generate.py env "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/env.sh"
+
+# Phase 3: Generate entity-build.sh
+python3 scripts/entity_generate.py build "$ENTITY_WORKDIR/requirements.json" \
+  --env "$ENTITY_WORKDIR/env.sh" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json" \
+  --output "$ENTITY_WORKDIR/entity-build.sh"
+
+# Run generated build script and update build_result
+python3 scripts/entity_run.py build "$ENTITY_WORKDIR/requirements.json" \
+  --script "$ENTITY_WORKDIR/entity-build.sh"
 ```
 
-## 中文简述
-
-这个 skill 的目标不是做大型远程构建框架，而是维护一条短而硬的 Entity 构建主链路：先写需求 JSON，再写依赖 checkpoint，通过兼容性检查后生成 `env.sh` 和 `entity-build.sh`，最后用 runner 执行并记录结果。
-
-详细规则以 `SKILL.md`、`scripts/entity_schema.py` 和 `references/` 为准。
+See `SKILL.md` and `references/` for the full contract.

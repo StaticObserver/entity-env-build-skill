@@ -4,11 +4,6 @@ Use this reference after `entity-deps.local.json` is written or repaired, and be
 
 The check answers one question: can this exact `requirements.json + entity-deps.local.json` pair safely generate an environment for the requested Entity build?
 
-Each result includes `checker_version` and `coverage`. Coverage values are
-explicit: `implemented` means mechanically checked, `partial` means only part of
-the contract is checked, and `not_implemented` means a pass result must not be
-read as proof for that item.
-
 Use the bundled checker first:
 
 ```bash
@@ -24,13 +19,7 @@ Write results to `entity-deps.local.json.compatibility`:
 ```json
 {
   "status": "pass|fail|partial",
-  "checker_version": 1,
   "checked_at": "",
-  "coverage": {
-    "requirements_checkpoint_match": "implemented",
-    "compiler_signature": "partial",
-    "cmake_package_probe": "not_implemented"
-  },
   "checks": [
     {
       "id": "",

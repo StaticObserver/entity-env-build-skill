@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 from _json_io import add_json_flag, ensure_harness_home, load_json, log_event, protocol_ok, write_json_atomic
-from entity_state import record_step
 
 
 def _utc_now() -> str:
@@ -109,21 +108,6 @@ def cmd_build(args: argparse.Namespace) -> None:
         script=str(script.resolve()),
         artifacts=[str(run_log.resolve()), str(args.requirements_json.resolve())],
         exit_code=exit_code,
-    )
-    record_step(
-        script.parent,
-        "build_executed",
-        status,
-        inputs={
-            "requirements_json": str(args.requirements_json.resolve()),
-            "entity_build_sh": str(script.resolve()),
-        },
-        outputs={
-            "requirements_json": str(args.requirements_json.resolve()),
-            "runner_log": str(run_log.resolve()),
-        },
-        run_id=run_id,
-        message=f"exit_code={exit_code}",
     )
 
     if args.json:

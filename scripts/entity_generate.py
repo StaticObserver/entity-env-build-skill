@@ -8,7 +8,6 @@ Subcommands:
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shlex
@@ -25,7 +24,6 @@ from _json_io import (
     protocol_ok,
     write_json_atomic,
 )
-from entity_state import record_step
 from _version_profile import (
     DEFAULT_VERSION_PROFILES,
     inferred_cxx_standard,
@@ -678,13 +676,6 @@ def cmd_env(args: argparse.Namespace) -> None:
             "validation": {"bash_syntax": "not_run", "commands": []},
         })
         write_json_atomic(args.json_path, data)
-        record_step(
-            args.output.parent,
-            "env_generated",
-            "pass",
-            inputs={"checkpoint_json": str(args.json_path.resolve())},
-            outputs={"env_sh": str(args.output.resolve())},
-        )
 
     if args.json:
         protocol_ok("generate.env", output=str(args.output.resolve()))
@@ -785,69 +776,42 @@ Compiler: CXX={compilers.get('CXX', '')} CC={compilers.get('CC', '')}
 """
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _compat_prompt(
-    req: Dict[str, Any],
-    checkpoint: Dict[str, Any],
-    req_path: Path,
-    checkpoint_path: Path,
-    remote: str = "",
-) -> str:
+def _compat_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
+                   remote: str = "") -> str:
     """Assemble Agent tool prompt for compatibility verification."""
-    req_abs = req_path.resolve()
-    checkpoint_abs = checkpoint_path.resolve()
-    req_hash = _sha256_file(req_abs)
-    checkpoint_hash = _sha256_file(checkpoint_abs)
-    script_path = Path(__file__).resolve()
-    selected = checkpoint.get("selected", {})
-    selected_keys = sorted(selected.keys()) if isinstance(selected, dict) else []
     remote_instructions = ""
     if remote:
         remote_instructions = f"""
-=== REMOTE EXECUTION (experimental) ===
-All verification commands MUST run on remote host: {remote}
+=== REMOTE EXECUTION ===
+All commands MUST run on remote host: {remote}
   ssh {remote} "<command>"
 
-Copy the JSON files and the matching skill scripts to the remote host first, or verify
-that the remote host already has this same script version:
-  local script: {script_path}
-
-Then run the remote copy of entity_compat.py with --no-update-json.
+For the compat script, scp the JSON files to remote first, then run:
+  scp <req-path> {remote}:/tmp/entity-req.json
+  scp <deps-path> {remote}:/tmp/entity-deps.json
+  ssh {remote} 'python3 /path/to/scripts/entity_compat.py /tmp/entity-req.json --checkpoint /tmp/entity-deps.json --no-update-json'
 
 File path checks: ssh {remote} 'test -f <path> && echo FOUND'
 """
 
     return f"""You are verifying dependency compatibility for an Entity build.
-You have a clean context with no prior conclusions. Verify the files on disk, not an inline snapshot.
+You have a clean context with no prior knowledge of these files.
 {remote_instructions}
-=== FILES TO VERIFY ===
-requirements_json: {req_abs}
-requirements_sha256: {req_hash}
-checkpoint_json: {checkpoint_abs}
-checkpoint_sha256: {checkpoint_hash}
+=== REQUIREMENTS JSON ===
+{json.dumps(req, indent=2)}
 
-=== JSON SUMMARY (orientation only; do not treat as proof) ===
-requirements: {json.dumps({"entity": req.get("entity", {}), "environment": req.get("environment", {}), "compile": req.get("compile", {})}, indent=2)}
-checkpoint: {json.dumps({"entity": checkpoint.get("entity", {}), "target": checkpoint.get("target", {}), "status": checkpoint.get("status", {}), "selected_keys": selected_keys}, indent=2)}
+=== DEPENDENCY CHECKPOINT JSON ===
+{json.dumps(checkpoint, indent=2)}
 
 YOUR TASK:
-1. Read both JSON files from disk and confirm their sha256 hashes match the values above.
-2. Run: python3 scripts/entity_compat.py {req_abs} --checkpoint {checkpoint_abs} --no-update-json{", via SSH to " + remote if remote else ""}.
+1. Read BOTH JSONs above — they are already in your context, no file reads needed.
+2. Run: python3 scripts/entity_compat.py <req-path> --checkpoint <deps-path> --no-update-json{", via SSH to " + remote if remote else ""}.
 3. For each FAIL/WARN, independently verify by checking file paths on disk
    (use Bash: ls, test -f, test -d{", via SSH to " + remote if remote else ""}).
 4. Return structured verdict:
 
 {{
   "verdict": "pass" | "partial" | "fail",
-  "requirements_sha256": "<observed sha256>",
-  "checkpoint_sha256": "<observed sha256>",
   "checks": [
     {{ "name": "<check name>", "result": "PASS"|"FAIL"|"WARN", "evidence": "<found/missing>" }}
   ],
@@ -867,7 +831,7 @@ def cmd_subagent(args: argparse.Namespace) -> None:
     remote = getattr(args, 'remote', "") or ""
 
     if args.mode == "compat":
-        prompt = _compat_prompt(req, checkpoint, args.requirements_json, args.checkpoint, remote)
+        prompt = _compat_prompt(req, checkpoint, remote)
     else:
         if not args.dep:
             raise SystemExit("--dep is required for build mode (kokkos, hdf5, or adios2)")
@@ -1152,17 +1116,6 @@ def cmd_build(args: argparse.Namespace) -> None:
             req["build_result"] = result
         result.update({"status": "not_run", **meta})
         write_json_atomic(args.requirements_json, req)
-        record_step(
-            args.output.parent,
-            "build_script_generated",
-            "pass",
-            inputs={
-                "requirements_json": str(args.requirements_json.resolve()),
-                "env_sh": str(args.env.resolve()),
-            },
-            outputs={"entity_build_sh": str(args.output.resolve())},
-            run_id=run_id,
-        )
 
     if args.json:
         protocol_ok("generate.build", output=str(args.output.resolve()))

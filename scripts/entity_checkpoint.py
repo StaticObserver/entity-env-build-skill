@@ -25,7 +25,6 @@ from _json_io import (
     write_json_atomic,
 )
 from _version_profile import version_profile as detect_version_profile
-from entity_state import record_step
 from entity_schema import CONSISTENCY_RULES, OPTIONAL_DEFAULTS, REQUIRED_ALWAYS, REQUIRED_BUILD
 
 
@@ -157,13 +156,6 @@ def cmd_validate(args: argparse.Namespace) -> None:
     blocking = result["status"] == "fail" or (
         result["status"] == "partial" and not args.allow_partial
     )
-    if result["status"] == "pass":
-        record_step(
-            args.requirements_json.parent,
-            "requirements_validated",
-            "pass",
-            inputs={"requirements_json": str(args.requirements_json.resolve())},
-        )
 
     if args.json:
         if blocking:
@@ -311,14 +303,6 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     checkpoint["requirements"]["path"] = str(args.requirements_json.resolve())
     write_json_atomic(output_path, checkpoint)
-    record_step(
-        output_path.parent,
-        "checkpoint_updated",
-        "pass",
-        inputs={"requirements_json": str(args.requirements_json.resolve())},
-        outputs={"checkpoint_json": str(output_path.resolve())},
-        message="checkpoint created",
-    )
 
     if args.json:
         protocol_ok("checkpoint.create", output=str(output_path.resolve()))
@@ -417,14 +401,6 @@ def cmd_record_install(args: argparse.Namespace) -> None:
         status["ready_for_entity_build"] = False
 
     write_json_atomic(args.checkpoint, checkpoint)
-    record_step(
-        args.checkpoint.parent,
-        "checkpoint_updated",
-        "pass",
-        inputs={"checkpoint_json": str(args.checkpoint.resolve())},
-        outputs={"checkpoint_json": str(args.checkpoint.resolve())},
-        message=f"recorded {dep} install evidence",
-    )
     if args.json:
         protocol_ok("checkpoint.record_install", checkpoint=str(args.checkpoint.resolve()), dep=dep)
     else:
