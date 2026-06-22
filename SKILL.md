@@ -77,7 +77,7 @@ Phase 2 — Environment probing and planning
   -> user confirmation gate for ambiguous choices
   -> generate source-build scripts when needed
   -> write entity-deps.local.json
-  -> compatibility check (via isolated sub-agent — see §2i)
+  -> compatibility check (§2i)
   -> generate env.sh
 
 Phase 3 — Entity build
@@ -392,13 +392,13 @@ Write every decision to JSON:
 
 If later probes invalidate a confirmed decision, mark it stale and re-enter this gate.
 
-#### 2h. Source-Build Dependencies (Isolated Sub-Agents)
+#### 2h. Source-Build Dependencies
 
 Only do this after local/system reuse fails and the user has approved source builds.
 
 For each missing dependency, in order: Kokkos → HDF5 → ADIOS2.
 
-**Step 1: Generate build script**
+**Step 1: Generate and execute build script**
 
 ```bash
 python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
@@ -406,20 +406,17 @@ python3 scripts/entity_generate.py deps "$ENTITY_WORKDIR/requirements.json" \
   --deps <dep>
 ```
 
-Generated scripts live under `$ENTITY_WORKDIR/generated/source-build-scripts/`.
+Generated scripts live under `$ENTITY_WORKDIR/deps/scripts/`. Execute directly:
 
-**Step 2: Launch sub-agent with clean context**
+```bash
+bash "$ENTITY_WORKDIR/deps/scripts/build-<dep>.sh"
+```
 
-Pass to the sub-agent:
-- Path to `requirements.json` (read-only)
-- Path to `entity-deps.local.json` (read-only)
-- `references/dependency-notes/<dep>.md` — build knowledge for this specific dependency
-- The generated build script path — execute it
-- Instruction: "Execute this build script. Capture configure/build/install output. If it fails, diagnose using the dependency notes. Do NOT modify any JSON files. Return structured result: {status, dep, prefix, cmake_config, version, compiler_signature, issues[]}"
+Before executing, read `references/dependency-notes/<dep>.md` so known build issues can be matched against configure/build failures. The build script has `set -euo pipefail` and stops on first failure. If it fails, diagnose using the decision tree in Phase 3 (§3b Build Failure Diagnosis) — many of those entries (compiler optimization bugs, ABI mismatches, GPU arch mismatches) apply to dependency builds too.
 
-**Step 3: Sub-agent returns → main agent updates checkpoint**
+**Step 2: Record install evidence**
 
-After sub-agent returns successfully, record install evidence through the checkpoint tool. Do not hand-edit `selected.<dep>`:
+After the build succeeds, record evidence through the checkpoint tool. Do not hand-edit `selected.<dep>`:
 
 ```bash
 python3 scripts/entity_checkpoint.py record-install \
@@ -434,52 +431,29 @@ python3 scripts/entity_checkpoint.py record-install \
 
 The command validates recorded paths, updates `selected.<dep>`, marks compatibility `unknown`, and forces a fresh compatibility check before proceeding to the next dependency.
 
-**Step 4: Repeat for next dependency**
+**Step 3: Repeat for next dependency**
 
 Kokkos → HDF5 → ADIOS2. Kokkos must build first. HDF5 and Kokkos can in theory be parallel but serial is safer (shared `$ENTITY_WORKDIR/deps/` install prefix). ADIOS2 must wait for both (its CMAKE_PREFIX_PATH includes both prefixes).
 
-**Skip sub-agent when** all of:
+**Skip source build when** all of:
 - `selected.<dep>.provider != "source-build"` OR already has `validation.installed = true`
 - `selected.<dep>.prefix` path exists
 - `selected.<dep>.cmake_config` file exists
 
-**Sub-agent permissions**: `Bash(bash build-<dep>.sh)` and `Read` only — no write access.
+#### 2i. Compatibility Check
 
-#### 2i. Compatibility Check (Isolated Sub-Agent)
+Run compatibility verification directly:
 
-**Critical:** LAUNCH A SUB-AGENT for compatibility verification. The sub-agent has a clean context — it has NOT participated in environment probing and has no stake in the dependency choices made so far.
+```bash
+python3 scripts/entity_compat.py "$ENTITY_WORKDIR/requirements.json" \
+  --checkpoint "$ENTITY_WORKDIR/entity-deps.local.json"
+```
 
-**Skip sub-agent only when ALL of the following are true** (run `scripts/entity_compat.py` directly):
-- `checkpoint.status.checkpoint == "complete"`
-- `checkpoint.status.satisfies_requirements_json == true`
-- `environment.backend == "cpu"`
-- `environment.mpi == false`
-- `environment.output == false` (only Kokkos + compiler needed)
+This writes the result to `entity-deps.local.json.compatibility`. If status is not `pass`:
+- Read each FAIL/WARN check's `remediation` field and fix the underlying issue
+- Re-run after fixes
 
-Otherwise, launch the sub-agent with:
-
-Pass to the sub-agent:
-- Path to `requirements.json`
-- Path to `entity-deps.local.json`
-- Hostname (for site-notes lookup)
-- Instruction: "Verify these two JSON files satisfy each other. Read both files from scratch. Do NOT trust any prior conclusions. Run `python3 scripts/entity_compat.py <req.json> --checkpoint <deps.json> --no-update-json`. For each FAIL/WARN check, independently verify by reading the JSON and checking file paths on disk. Return a structured verdict."
-
-The sub-agent MUST:
-1. Run: `python3 scripts/entity_compat.py <req.json> --checkpoint <deps.json> --no-update-json`
-2. For each FAIL/WARN check, independently verify the evidence on disk
-3. Return a structured verdict:
-   - `pass`: all checks pass, ready for env.sh generation
-   - `partial`: only source-build scripts not yet executed are blocking
-   - `fail`: specific items to fix (with remediation from check output)
-
-After the sub-agent returns:
-- **If pass**: main agent runs `entity_compat.py` without `--no-update-json` to write result to checkpoint JSON; save the sub-agent's full report to `~/.entity-env-build/compat/<run_id>.json`
-- **If partial/fail**: main agent fixes issues, then **RE-LAUNCH a fresh sub-agent** (do not reuse the same sub-agent conversation)
-- **New issues discovered**: write to `~/.entity-env-build/site-notes/<hostname>.md` Known Issues
-
-**Sub-agent permissions**: `Bash(python3 scripts/entity_compat.py ...)` and `Read` only — no write access.
-
-Only `status=pass` allows `env.sh` generation.
+Only `compatibility.status=pass` allows `env.sh` generation.
 
 ### Phase 3: Entity Build
 

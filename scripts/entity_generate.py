@@ -8,7 +8,6 @@ Subcommands:
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shlex
@@ -691,209 +690,6 @@ def cmd_env(args: argparse.Namespace) -> None:
 
 
 # ===========================================================================
-# subagent prompt generation (subcommand: subagent)
-# ===========================================================================
-
-_REQUIREMENTS_KEYS = ("entity", "environment", "compile")
-
-
-def _build_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
-                  dep: str, scripts_dir: Path, notes_dir: Path,
-                  remote: str = "") -> str:
-    """Assemble Agent tool prompt for dependency source build."""
-    profile = entity_version_profile(req)
-    version = requested_version(req, dep, profile)
-    compilers = compiler_env(checkpoint)
-
-    script_path = scripts_dir / f"build-{dep}.sh"
-    if not script_path.is_file():
-        raise SystemExit(f"Build script not found: {script_path}")
-    build_script = script_path.read_text(encoding="utf-8")
-
-    notes_path = notes_dir / f"{dep}.md"
-    notes = notes_path.read_text(encoding="utf-8") if notes_path.is_file() else (
-        "# No dependency notes available for {dep}\n".format(dep=dep)
-    )
-
-    req_sections: Dict[str, Any] = {}
-    for key in _REQUIREMENTS_KEYS:
-        if key in req:
-            req_sections[key] = req[key]
-
-    check_ver = checkpoint.get("compatibility", {}).get("status", "unknown") \
-        if isinstance(checkpoint.get("compatibility"), dict) else "unknown"
-
-    remote_section = ""
-    if remote:
-        remote_section = f"""
-=== REMOTE EXECUTION ===
-Build environment is on remote host: {remote}
-ALL commands MUST be run via SSH:
-  ssh {remote} "<command>"
-
-For bash scripts: save the BUILD SCRIPT to a temp file via SSH, then execute it:
-  ssh {remote} 'cat > /tmp/build-{dep}.sh' << 'ENDSCRIPT'
-<paste build script>
-ENDSCRIPT
-  ssh {remote} 'bash /tmp/build-{dep}.sh'
-
-For file checks:
-  ssh {remote} 'test -f /path/to/{dep}Config.cmake && echo FOUND || echo MISSING'
-"""
-
-    return f"""{{
-  "status": "success",
-  "dep": "{dep}",
-  "version": "",
-  "prefix": "",
-  "cmake_config": "",
-  "compiler_signature": "",
-  "issues": [],
-  "diagnosis": ""
-}}
-
-Build {dep} {version} for Entity.
-{remote_section}
-=== REQUIREMENTS (from requirements.json) ===
-{json.dumps(req_sections, indent=2)}
-
-=== BUILD SCRIPT (execute this) ===
-{build_script}
-
-=== KNOWN ISSUES & FIXES (study BEFORE executing) ===
-{notes}
-
-YOUR TASK:
-1. Study the KNOWN ISSUES section above — match any build errors against these.
-2. Execute the BUILD SCRIPT above using Bash{", via SSH to " + remote if remote else ""}.
-3. Validate: check that {dep}Config.cmake or equivalent exists in the install prefix.
-
-IF BUILD FAILS:
-- Match the error against Known Issues above.
-- If matched, apply the fix (in priority order) and retry ONCE.
-- If no match or retry fails, STOP and report failure.
-- Do NOT invent new fixes beyond what is documented above.
-
-CRITICAL RULES:
-- Do NOT modify requirements.json or entity-deps.local.json
-- Do NOT modify Entity source files
-- Build only {dep}, NOT Entity
-
-Return structured result filling in the JSON template shown at the top.
-Compatibility status: {check_ver}
-Compiler: CXX={compilers.get('CXX', '')} CC={compilers.get('CC', '')}
-"""
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _compat_prompt(
-    req: Dict[str, Any],
-    checkpoint: Dict[str, Any],
-    req_path: Path,
-    checkpoint_path: Path,
-    remote: str = "",
-) -> str:
-    """Assemble Agent tool prompt for compatibility verification."""
-    req_abs = req_path.resolve()
-    checkpoint_abs = checkpoint_path.resolve()
-    req_hash = _sha256_file(req_abs)
-    checkpoint_hash = _sha256_file(checkpoint_abs)
-    script_path = Path(__file__).resolve()
-    selected = checkpoint.get("selected", {})
-    selected_keys = sorted(selected.keys()) if isinstance(selected, dict) else []
-    remote_instructions = ""
-    if remote:
-        remote_instructions = f"""
-=== REMOTE EXECUTION (experimental) ===
-All verification commands MUST run on remote host: {remote}
-  ssh {remote} "<command>"
-
-Copy the JSON files and the matching skill scripts to the remote host first, or verify
-that the remote host already has this same script version:
-  local script: {script_path}
-
-Then run the remote copy of entity_compat.py with --no-update-json.
-
-File path checks: ssh {remote} 'test -f <path> && echo FOUND'
-"""
-
-    return f"""You are verifying dependency compatibility for an Entity build.
-You have a clean context with no prior conclusions. Verify the files on disk, not an inline snapshot.
-{remote_instructions}
-=== FILES TO VERIFY ===
-requirements_json: {req_abs}
-requirements_sha256: {req_hash}
-checkpoint_json: {checkpoint_abs}
-checkpoint_sha256: {checkpoint_hash}
-
-=== JSON SUMMARY (orientation only; do not treat as proof) ===
-requirements: {json.dumps({"entity": req.get("entity", {}), "environment": req.get("environment", {}), "compile": req.get("compile", {})}, indent=2)}
-checkpoint: {json.dumps({"entity": checkpoint.get("entity", {}), "target": checkpoint.get("target", {}), "status": checkpoint.get("status", {}), "selected_keys": selected_keys}, indent=2)}
-
-YOUR TASK:
-1. Read both JSON files from disk and confirm their sha256 hashes match the values above.
-2. Run: python3 scripts/entity_compat.py {req_abs} --checkpoint {checkpoint_abs} --no-update-json{", via SSH to " + remote if remote else ""}.
-3. For each FAIL/WARN, independently verify by checking file paths on disk
-   (use Bash: ls, test -f, test -d{", via SSH to " + remote if remote else ""}).
-4. Return structured verdict:
-
-{{
-  "verdict": "pass" | "partial" | "fail",
-  "requirements_sha256": "<observed sha256>",
-  "checkpoint_sha256": "<observed sha256>",
-  "checks": [
-    {{ "name": "<check name>", "result": "PASS"|"FAIL"|"WARN", "evidence": "<found/missing>" }}
-  ],
-  "summary": "<one-line summary>",
-  "remediation": ["<action 1>", "<action 2>"]
-}}
-
-Do NOT modify any JSON files. Do NOT run cmake or build commands.
-"""
-
-
-def cmd_subagent(args: argparse.Namespace) -> None:
-    """Generate a complete Agent-tool-ready prompt for isolated sub-agent execution."""
-    req = load_json(args.requirements_json)
-    checkpoint = load_json(args.checkpoint)
-
-    remote = getattr(args, 'remote', "") or ""
-
-    if args.mode == "compat":
-        prompt = _compat_prompt(req, checkpoint, args.requirements_json, args.checkpoint, remote)
-    else:
-        if not args.dep:
-            raise SystemExit("--dep is required for build mode (kokkos, hdf5, or adios2)")
-        dep = args.dep
-        if dep not in ("kokkos", "hdf5", "adios2"):
-            raise SystemExit(f"Unsupported dependency: {dep}. Must be kokkos, hdf5, or adios2.")
-        workdir = get_workdir(req)
-        scripts_dir = args.scripts_dir or (workdir / "deps" / "scripts")
-        notes_dir = args.notes_dir or (
-            Path(__file__).resolve().parent.parent / "references" / "dependency-notes"
-        )
-        prompt = _build_prompt(req, checkpoint, dep, Path(scripts_dir), Path(notes_dir), remote)
-
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(prompt, encoding="utf-8")
-        if args.json:
-            protocol_ok("generate.subagent", output=str(args.output.resolve()), mode=args.mode)
-    else:
-        if args.json:
-            protocol_ok("generate.subagent", prompt=prompt, mode=args.mode)
-        else:
-            print(prompt)
-
-
-# ===========================================================================
 # entity-build.sh generation (subcommand: build)
 # ===========================================================================
 
@@ -1201,25 +997,6 @@ def main() -> None:
     p_build.add_argument("--run-id", help="Run ID for event log (auto-generated if omitted)")
     add_json_flag(p_build)
 
-    # --- subagent ---
-    p_subagent = sub.add_parser("subagent", help="Generate Agent-tool-ready prompt for isolated sub-agents")
-    p_subagent.add_argument("requirements_json", type=Path)
-    p_subagent.add_argument("--checkpoint", type=Path, required=True)
-    p_subagent.add_argument("--dep", choices=["kokkos", "hdf5", "adios2"],
-                            help="Dependency to build (build mode)")
-    p_subagent.add_argument("--mode", choices=["build", "compat"], default="build",
-                            help="Sub-agent mode: build (default) or compat")
-    p_subagent.add_argument("--notes-dir", type=Path,
-                            help="Path to references/dependency-notes (default: auto-detect)")
-    p_subagent.add_argument("--scripts-dir", type=Path,
-                            help="Path to deps/scripts (default: auto-detect)")
-    p_subagent.add_argument("--output", type=Path,
-                            help="Write prompt to file (default: stdout)")
-    p_subagent.add_argument("--remote",
-                            help="Remote host for execution (e.g., user@host). "
-                                 "Generated prompt includes SSH wrapping instructions.")
-    add_json_flag(p_subagent)
-
     args = parser.parse_args()
 
     if args.subcommand is None:
@@ -1236,8 +1013,6 @@ def main() -> None:
         cmd_env(args)
     elif args.subcommand == "build":
         cmd_build(args)
-    elif args.subcommand == "subagent":
-        cmd_subagent(args)
 
 
 if __name__ == "__main__":

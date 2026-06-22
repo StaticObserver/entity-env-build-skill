@@ -402,29 +402,6 @@ class HardGateTests(unittest.TestCase):
             self.assertEqual(compat["coverage"]["requirements_checkpoint_match"], "implemented")
             self.assertIn("cmake_package_probe", compat["coverage"])
 
-    def test_compat_prompt_requires_file_reads_and_hashes(self):
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            req_path = tmp / "requirements.json"
-            deps_path = tmp / "entity-deps.local.json"
-            self.write_json(req_path, self.base_requirements(tmp))
-            self.write_json(deps_path, {"schema_version": 1, "selected": {}})
-
-            proc = run_cmd(
-                "scripts/entity_generate.py",
-                "subagent",
-                str(req_path),
-                "--checkpoint",
-                str(deps_path),
-                "--mode",
-                "compat",
-            )
-
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            self.assertIn("requirements_sha256", proc.stdout)
-            self.assertIn("Read both JSON files from disk", proc.stdout)
-            self.assertNotIn("no file reads needed", proc.stdout)
-
     def test_run_build_records_success(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
