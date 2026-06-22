@@ -57,6 +57,7 @@ Route those tasks to `entity-case`, `entity-analysis`, or `entity-core-dev`.
 - Use output support by default. When `requirements.environment.output=true`, require `ADIOS2 + HDF5`.
 - Unless the user explicitly accepts the risk, all dependencies must use one consistent, non-conflicting compiler/toolchain.
 - Entity `1.4.0` and newer require `C++20`, `Kokkos 5.x`, and `ADIOS2 2.11.x`; versions before `1.4.0` use `C++17`, `Kokkos 4.x`, and `ADIOS2 2.10.x`.
+- Entity versions **before `1.4.3` are not compatible with CUDA backend + modern profile (C++20)**. NVCC's EDG frontend rejects C++20 `requires` constraints in `metadomain_reshape.cpp` (`constraints on a non-templated function`). Entity `1.4.3` (PR #210) replaced `requires` with `static_assert`, fixing this. A second NVCC+EDG bug exists in bundled TOML11: `std::source_location::current` consteval fails with GCC 12.x host (`call to consteval function did not produce a valid constant expression`); workaround is `-DCMAKE_CXX_FLAGS="-UTOML11_HAS_STD_SOURCE_LOCATION"`, but upgrading Entity is the real fix since both bugs must be resolved.
 - Only the `Kokkos 5.x + ADIOS2 2.11.x` profile builds ADIOS2 with Kokkos support. Other profiles must not add Kokkos as an ADIOS2 dependency unless the user explicitly overrides the profile.
 - For CUDA backend builds, use Kokkos `nvcc_wrapper` as the C++ compiler, usually from `Kokkos source/install prefix/bin/nvcc_wrapper`. Record both wrapper path and host compiler.
 - For source builds, generate local scripts with `scripts/entity_generate.py deps`, using the Entity wiki dependency generator and `dependencies.py` rules as the minimal-options baseline. Record script source and any deviations.
@@ -555,6 +556,8 @@ When the build fails, do NOT blindly retry. Diagnose using this decision tree:
 | `PHI node entries do not match` | Same compiler optimization bug | Same as above — reduce optimization level |
 | `undefined reference to ...` | ABI mismatch or missing link library | Check all pre-built deps use same compiler family; verify `LD_LIBRARY_PATH` |
 | `error: invalid target ID 'gfxXXX'` | GPU architecture mismatch | Kokkos was built for different GPU arch than current node. Check `Kokkos_ARCH_*` vs node GPU |
+| `constraints on a non-templated function` | Entity < 1.4.3 + CUDA backend (NVCC EDG frontend does not support C++20 `requires` constraints) | Upgrade Entity to >= 1.4.3. Entity 1.4.3 (PR #210) replaces `requires` with `static_assert`. Do NOT attempt to fix with compiler flags — no flag workaround exists for this EDG limitation |
+| `call to consteval function "std::source_location::current" did not produce a valid constant expression` | TOML11 + GCC 12.x host + NVCC EDG (bundled toml11 uses `std::source_location::current()` which EDG rejects as non-constexpr) | Add `-DCMAKE_CXX_FLAGS="-UTOML11_HAS_STD_SOURCE_LOCATION"`. But note this alone is insufficient — the `constraints on a non-templated function` bug (above) also blocks Entity < 1.4.3 with CUDA. Upgrade Entity to >= 1.4.3 to fix both |
 
 **SLURM/job failures:**
 
