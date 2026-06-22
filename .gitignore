@@ -9,3 +9,4 @@ deps/
 requirements.json
 env.sh
 entity-build.sh
+CLAUDE.md

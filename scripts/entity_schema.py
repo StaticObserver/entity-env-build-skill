@@ -94,12 +94,12 @@ ConsistencyRule = tuple  # (str, tuple | None, tuple, str)
 CONSISTENCY_RULES: List[ConsistencyRule] = [
     ("pgen.mutex", None, ("compile.pgen", "compile.pgens"),
      "compile.pgen and compile.pgens are mutually exclusive. Use one."),
-    ("output.requires_adios2", None, ("environment.output", None),
-     "environment.output=true requires ADIOS2 and HDF5 in the dependency plan."),
-    ("cuda.requires_nvcc", ("environment.backend", "cuda"), ("compile.cxx_standard", None),
-     "CUDA backend requires Kokkos nvcc_wrapper as CXX."),
-    ("hip.requires_rocm", ("environment.backend", "hip"), ("compile.cxx_standard", None),
-     "HIP backend requires ROCm/hipcc toolchain and HIP-aware Kokkos."),
+    ("output.requires_policy", ("environment.output", "true"), ("environment.dependency_policy", None),
+     "environment.output=true requires environment.dependency_policy to be set (covers ADIOS2 + HDF5)."),
+    ("cuda.requires_cxx", ("environment.backend", "cuda"), ("compile.cxx_standard", None),
+     "CUDA backend requires compile.cxx_standard to be set (must match the Entity version profile)."),
+    ("hip.requires_cxx", ("environment.backend", "hip"), ("compile.cxx_standard", None),
+     "HIP backend requires compile.cxx_standard to be set (must match the Entity version profile)."),
 ]
 
 # ---------------------------------------------------------------------------

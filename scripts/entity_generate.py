@@ -312,7 +312,11 @@ def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Pat
         selected = checkpoint.get("selected", {}) if isinstance(checkpoint, dict) else {}
         gpu_toolkit = selected.get("gpu_toolkit", {}) if isinstance(selected, dict) else {}
         cuda_prefix = str(gpu_toolkit.get("prefix") or "")
-        cuda_arch = str(selected.get("kokkos", {}).get("cuda_arch") or env.get("gpu_arch", ""))
+        kokkos_entry = selected.get("kokkos", {})
+        cuda_arch = str(
+            (kokkos_entry.get("cuda_arch") if isinstance(kokkos_entry, dict) else "")
+            or env.get("gpu_arch", "")
+        )
         if cuda_prefix and cuda_arch:
             # Map Kokkos arch name to CUDA compute capability
             arch_num = _kokkos_arch_to_cuda(cuda_arch)

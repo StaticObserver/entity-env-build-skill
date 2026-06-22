@@ -122,10 +122,12 @@ def validate_compiler_executable(
 ) -> bool:
     """Check that compiler.cxx (and .cc if present) exist and are executable."""
     ok = True
+    has_any_key = False
     for key, label in (("cxx", "CXX"), ("cc", "CC")):
         path_str = str(compiler.get(key) or "")
         if not path_str:
             continue
+        has_any_key = True
         p = Path(path_str)
         if not p.exists():
             add(
@@ -149,7 +151,18 @@ def validate_compiler_executable(
             )
             issues.append(f"{label} is not executable: {p}")
             ok = False
-    if ok and compiler:
+    if not has_any_key:
+        add(
+            checks,
+            "compiler.executable",
+            "fail",
+            "No compiler keys (cxx/cc) found in selected.compiler entry",
+            {},
+            remediation="Add cxx field to selected.compiler in entity-deps.local.json.",
+        )
+        issues.append("No compiler keys (cxx/cc) in selected.compiler")
+        ok = False
+    elif ok:
         add(
             checks,
             "compiler.executable",
@@ -279,23 +292,40 @@ def _cross_check_kokkos_compiler(
     kokkos_cxx_basename = Path(kokkos_cxx).name
     selected_cxx_basename = Path(selected_cxx).name if selected_cxx else ""
 
-    kokkos_is_hip = "hipcc" in kokkos_cxx_basename or "nvcc_wrapper" in kokkos_cxx_basename
-    selected_is_hip = "hipcc" in selected_cxx_basename or "nvcc_wrapper" in selected_cxx_basename
+    # Classify each compiler as CUDA wrapper, HIP compiler, or regular C++
+    def _classify(name: str) -> str:
+        if "nvcc_wrapper" in name:
+            return "cuda_wrapper"
+        if "hipcc" in name:
+            return "hipcc"
+        return "host"
 
-    if kokkos_is_hip != selected_is_hip:
+    kokkos_class = _classify(kokkos_cxx_basename)
+    selected_class = _classify(selected_cxx_basename)
+
+    incompatible = (
+        kokkos_class != selected_class
+        # cross-check: nvcc_wrapper (CUDA) ≠ hipcc (HIP) — different GPU toolchains
+        or (kokkos_class == "cuda_wrapper" and selected_class == "hipcc")
+        or (kokkos_class == "hipcc" and selected_class == "cuda_wrapper")
+    )
+
+    if incompatible:
         add(
             checks,
             "cross.kokkos_compiler_consistency",
             "fail",
-            f"Kokkos was built with {kokkos_cxx_basename} but Entity will use {selected_cxx_basename} — likely ABI incompatible",
+            f"Kokkos was built with {kokkos_cxx_basename} ({kokkos_class}) but Entity will use {selected_cxx_basename} ({selected_class}) — likely ABI incompatible",
             {
                 "kokkos_compiler": kokkos_cxx,
+                "kokkos_toolchain": kokkos_class,
                 "selected_compiler": selected_cxx,
+                "selected_toolchain": selected_class,
             },
             remediation=f"Either rebuild Kokkos with {selected_cxx_basename} or select a compiler matching Kokkos's {kokkos_cxx_basename} toolchain.",
         )
         issues.append(
-            f"Kokkos compiler ({kokkos_cxx_basename}) incompatible with selected compiler ({selected_cxx_basename})"
+            f"Kokkos compiler ({kokkos_cxx_basename}, {kokkos_class}) incompatible with selected compiler ({selected_cxx_basename}, {selected_class})"
         )
     else:
         add(

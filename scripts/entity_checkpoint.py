@@ -84,14 +84,6 @@ def check_consistency(req: Dict[str, Any]) -> List[Dict[str, str]]:
             if val_a is None or (isinstance(val_a, str) and val_a == ""):
                 issues.append({"rule": rule_id, "message": msg, "fields": [field_a]})
 
-    env_output = _get(req, "environment.output")
-    if env_output is True or str(env_output).lower() == "true":
-        if not _has(req, "environment.dependency_policy"):
-            issues.append({
-                "rule": "output.policy",
-                "message": "output=true: ensure dependency_policy covers ADIOS2 + HDF5.",
-                "fields": ["environment.dependency_policy"],
-            })
     return issues
 
 

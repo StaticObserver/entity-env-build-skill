@@ -7,13 +7,24 @@ Profile constants live in entity_schema.py (single source of truth).
 """
 
 import sys
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from entity_schema import PROFILES, DEFAULT_HDF5_VERSION
 from entity_schema import DEFAULT_VERSION_PROFILES as _DEFAULT_VERSION_PROFILES
 
 
 DEFAULT_VERSION_PROFILES = _DEFAULT_VERSION_PROFILES  # re-export
+
+
+def _parse_digits(version_str: str) -> List[int]:
+    """Parse a version string like '1.4.0' or 'v1.4' into [major, minor, ...]."""
+    digits: List[int] = []
+    for part in version_str.removeprefix("v").replace("x", "0").split("."):
+        if part.isdigit():
+            digits.append(int(part))
+        else:
+            break
+    return digits
 
 
 def detect_profile_name(req: Dict[str, Any]) -> str:
@@ -32,13 +43,7 @@ def detect_profile_name(req: Dict[str, Any]) -> str:
             "requirements.entity.version_bucket or dependency_profile is required"
         )
 
-    digits = []
-    for part in version.removeprefix("v").replace("x", "0").split("."):
-        if part.isdigit():
-            digits.append(int(part))
-        else:
-            break
-
+    digits = _parse_digits(version)
     if len(digits) >= 2 and (digits[0], digits[1]) < (1, 4):
         return "legacy"
     return "modern"
@@ -74,12 +79,7 @@ def inferred_cxx_standard(req: Dict[str, Any]) -> str:
             raise SystemExit(
                 "requirements.json missing entity.version_bucket or entity.dependency_profile"
             )
-        digits = []
-        for part in version.removeprefix("v").replace("x", "0").split("."):
-            if part.isdigit():
-                digits.append(int(part))
-            else:
-                break
+        digits = _parse_digits(version)
         if len(digits) >= 2 and (digits[0], digits[1]) < (1, 4):
             return "17"
         if len(digits) >= 2:
@@ -101,6 +101,8 @@ def requested_version(req: Dict[str, Any], dep: str, profile: Dict[str, Any]) ->
     if isinstance(versions, dict) and versions.get(dep):
         return str(versions[dep])
 
+    if dep in ("mpi", "openmpi"):
+        return str(versions.get("mpi") or versions.get("openmpi") or "system")
     if dep == "kokkos":
         default = str(profile.get("kokkos_default") or "")
         if default:

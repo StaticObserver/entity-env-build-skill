@@ -146,12 +146,6 @@ def add_json_flag(parser: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def init_run(session_id: str) -> str:
-    """Generate a run_id, create harness dirs if needed. Return run_id."""
-    ensure_harness_home()
-    return uuid.uuid4().hex[:8]
-
-
 def log_event(
     run_id: str,
     session_id: str,
@@ -311,7 +305,7 @@ def update_session_state(workdir: Path, **updates: Any) -> None:
             state["last_action_at"] = now
         elif key == "phase":
             state["phase"] = str(value)
-        elif key in state:
+        else:
             state[key] = value
 
     write_json_atomic(path, state)
