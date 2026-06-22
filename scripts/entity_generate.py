@@ -78,6 +78,20 @@ def get_workdir(req: Dict[str, Any]) -> Path:
     raise SystemExit("requirements.json missing entity.workdir and ENTITY_WORKDIR is unset")
 
 
+def get_pgen_dir(req: Dict[str, Any]) -> Path:
+    """problems/<pgen>/ under ROOT — the pgen's source/config directory."""
+    compile_cfg = req.get("compile", {})
+    pgen = compile_cfg.get("pgen")
+    if not pgen:
+        raise SystemExit("requirements.json missing required field: compile.pgen")
+    return get_workdir(req) / "problems" / str(pgen)
+
+
+def get_build_artifacts_dir(req: Dict[str, Any]) -> Path:
+    """_build/ under pgen — all tool-generated build artifacts."""
+    return get_pgen_dir(req) / "_build"
+
+
 # ===========================================================================
 # Shell generation helpers
 # ===========================================================================
@@ -165,7 +179,9 @@ def _kokkos_arch_to_cuda(arch: str) -> str:
 # ===========================================================================
 
 
-def script_header(name: str, workdir: Path, prefix: Path, compilers: Dict[str, str]) -> str:
+def script_header(name: str, workdir: Path, pgen_dir: Path, prefix: Path,
+                  compilers: Dict[str, str]) -> str:
+    build_artifacts_dir = pgen_dir / "_build"
     lines = [
         "#!/usr/bin/env bash",
         f"# Generated dependency build script for {name}. Review before execution.",
@@ -174,13 +190,15 @@ def script_header(name: str, workdir: Path, prefix: Path, compilers: Dict[str, s
         f"  ENTITY_WORKDIR={q(workdir)}",
         "fi",
         "export ENTITY_WORKDIR",
+        f"export PGEN_DIR={q(pgen_dir)}",
+        f"export BUILD_ARTIFACTS_DIR={q(build_artifacts_dir)}",
         'if [ -z "${PREFIX:-}" ]; then',
         f"  PREFIX={q(prefix)}",
         "fi",
         "export PREFIX",
-        'SRC_ROOT="${ENTITY_WORKDIR}/generated/source-trees"',
-        'BUILD_ROOT="${ENTITY_WORKDIR}/generated/source-builds"',
-        'LOG_DIR="${ENTITY_WORKDIR}/build-logs"',
+        'SRC_ROOT="${ENTITY_WORKDIR}/deps/sources"',
+        'BUILD_ROOT="${BUILD_ARTIFACTS_DIR}/generated/source-builds"',
+        'LOG_DIR="${BUILD_ARTIFACTS_DIR}/build-logs"',
         "mkdir -p \"$SRC_ROOT\" \"$BUILD_ROOT\" \"$PREFIX\" \"$LOG_DIR\"",
     ]
     for key in ("CC", "CXX", "MPICXX"):
@@ -195,9 +213,10 @@ def script_header(name: str, workdir: Path, prefix: Path, compilers: Dict[str, s
 def _kokkos_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
-    prefix = workdir / "deps" / "kokkos"
     profile = entity_version_profile(req)
     version = requested_version(req, "kokkos", profile)
+    prefix = workdir / "deps" / "kokkos" / version
+    pgen_dir = get_pgen_dir(req)
     if not isinstance(env, dict):
         env = {}
     backend = str(env.get("backend") or "cpu").lower()
@@ -226,7 +245,7 @@ fi
 export CXX="$SRC/bin/nvcc_wrapper"
 """
     return (
-        script_header("kokkos", workdir, prefix, compilers)
+        script_header("kokkos", workdir, pgen_dir, prefix, compilers)
         + f"""
 VERSION="${{KOKKOS_VERSION:-{version}}}"
 SRC="$SRC_ROOT/kokkos-$VERSION"
@@ -246,12 +265,13 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/kokkos-install.log"
 def _hdf5_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
-    prefix = workdir / "deps" / "hdf5"
     version = requested_version(req, "hdf5", entity_version_profile(req))
+    prefix = workdir / "deps" / "hdf5" / version
+    pgen_dir = get_pgen_dir(req)
     mpi_on = bool(env.get("mpi")) if isinstance(env, dict) else False
     parallel = "-DHDF5_ENABLE_PARALLEL=ON" if mpi_on else "-DHDF5_ENABLE_PARALLEL=OFF"
     return (
-        script_header("hdf5", workdir, prefix, compilers)
+        script_header("hdf5", workdir, pgen_dir, prefix, compilers)
         + f"""
 VERSION="${{HDF5_VERSION:-{version}}}"
 SRC="$SRC_ROOT/hdf5-$VERSION"
@@ -272,16 +292,19 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/hdf5-install.log"
 def _adios2_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     env = req.get("environment", {})
     compilers = compiler_env(checkpoint)
-    prefix = workdir / "deps" / "adios2"
     profile = entity_version_profile(req)
     version = requested_version(req, "adios2", profile)
+    hdf5_version = requested_version(req, "hdf5", profile)
+    kokkos_version = requested_version(req, "kokkos", profile)
+    prefix = workdir / "deps" / "adios2" / version
+    pgen_dir = get_pgen_dir(req)
     if not isinstance(env, dict):
         env = {}
     mpi_on = bool(env.get("mpi"))
     backend = str(env.get("backend") or "cpu").lower()
-    prefix_parts = [str(workdir / "deps" / "hdf5")]
+    prefix_parts = [str(workdir / "deps" / "hdf5" / hdf5_version)]
     if profile["adios2_uses_kokkos"]:
-        prefix_parts.insert(0, str(workdir / "deps" / "kokkos"))
+        prefix_parts.insert(0, str(workdir / "deps" / "kokkos" / kokkos_version))
     cmake_prefix_base = ":".join(prefix_parts)
     # CUDA + Kokkos requires explicit CMAKE_CUDA_COMPILER and ARCHITECTURES
     cuda_extra = ""
@@ -324,7 +347,7 @@ export CMAKE_SHARED_LINKER_FLAGS="-L{stubs_path} -L{cuda_lib_path} ${{CMAKE_SHAR
     ]
     opts = [opt for opt in opts if opt]
     return (
-        script_header("adios2", workdir, prefix, compilers)
+        script_header("adios2", workdir, pgen_dir, prefix, compilers)
         + f"""
 VERSION="${{ADIOS2_VERSION:-v{version}}}"
 SRC="$SRC_ROOT/ADIOS2-$VERSION"
@@ -345,9 +368,12 @@ cmake --install "$BUILD" 2>&1 | tee "$LOG_DIR/adios2-install.log"
 
 def _mpi_script(req: Dict[str, Any], checkpoint: Dict[str, Any], workdir: Path) -> str:
     compilers = compiler_env(checkpoint)
-    prefix = workdir / "deps" / "openmpi"
+    profile = entity_version_profile(req)
+    version = requested_version(req, "openmpi", profile)
+    prefix = workdir / "deps" / "openmpi" / version
+    pgen_dir = get_pgen_dir(req)
     return (
-        script_header("openmpi", workdir, prefix, compilers)
+        script_header("openmpi", workdir, pgen_dir, prefix, compilers)
         + """
 cat >&2 <<'MSG'
 OpenMPI source build is intentionally not auto-generated yet.
@@ -387,7 +413,7 @@ def cmd_deps(args: argparse.Namespace) -> None:
     req = load_json(args.requirements_json)
     checkpoint = load_json(args.checkpoint)
     workdir = get_workdir(req)
-    out_dir = args.output_dir or workdir / "generated" / "source-build-scripts"
+    out_dir = args.output_dir or workdir / "deps" / "scripts"
     out_dir.mkdir(parents=True, exist_ok=True)
     scripts: Dict[str, Dict[str, str]] = {}
     profile = entity_version_profile(req)
@@ -573,14 +599,7 @@ def default_env_path(data: Dict[str, Any], json_path: Path) -> Path:
     artifacts = data.get("artifacts", {})
     if isinstance(artifacts, dict) and artifacts.get("env_sh"):
         return Path(str(artifacts["env_sh"]))
-    requirements = data.get("requirements", {})
-    if isinstance(requirements, dict):
-        entity = requirements.get("entity", {})
-        if isinstance(entity, dict) and entity.get("workdir"):
-            return Path(str(entity["workdir"])) / "env.sh"
-    env_workdir = os.environ.get("ENTITY_WORKDIR")
-    if env_workdir:
-        return Path(env_workdir) / "env.sh"
+    # Default: same directory as the checkpoint JSON (i.e. _build/)
     return json_path.parent / "env.sh"
 
 
@@ -610,6 +629,145 @@ def cmd_env(args: argparse.Namespace) -> None:
 
     if args.json:
         protocol_ok("generate.env", output=str(args.output.resolve()))
+
+
+# ===========================================================================
+# subagent prompt generation (subcommand: subagent)
+# ===========================================================================
+
+_REQUIREMENTS_KEYS = ("entity", "environment", "compile")
+
+
+def _build_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any],
+                  dep: str, scripts_dir: Path, notes_dir: Path) -> str:
+    """Assemble Agent tool prompt for dependency source build."""
+    profile = entity_version_profile(req)
+    version = requested_version(req, dep, profile)
+    compilers = compiler_env(checkpoint)
+
+    script_path = scripts_dir / f"build-{dep}.sh"
+    if not script_path.is_file():
+        raise SystemExit(f"Build script not found: {script_path}")
+    build_script = script_path.read_text(encoding="utf-8")
+
+    notes_path = notes_dir / f"{dep}.md"
+    notes = notes_path.read_text(encoding="utf-8") if notes_path.is_file() else (
+        "# No dependency notes available for {dep}\n".format(dep=dep)
+    )
+
+    req_sections: Dict[str, Any] = {}
+    for key in _REQUIREMENTS_KEYS:
+        if key in req:
+            req_sections[key] = req[key]
+
+    check_ver = checkpoint.get("compatibility", {}).get("status", "unknown") \
+        if isinstance(checkpoint.get("compatibility"), dict) else "unknown"
+
+    return f"""{{
+  "status": "success",
+  "dep": "{dep}",
+  "version": "",
+  "prefix": "",
+  "cmake_config": "",
+  "compiler_signature": "",
+  "issues": [],
+  "diagnosis": ""
+}}
+
+Build {dep} {version} for Entity.
+
+=== REQUIREMENTS (from requirements.json) ===
+{json.dumps(req_sections, indent=2)}
+
+=== BUILD SCRIPT (execute this) ===
+{build_script}
+
+=== KNOWN ISSUES & FIXES (study BEFORE executing) ===
+{notes}
+
+YOUR TASK:
+1. Study the KNOWN ISSUES section above — match any build errors against these.
+2. Execute the BUILD SCRIPT above using Bash.
+3. Validate: check that {dep}Config.cmake or equivalent exists in the install prefix.
+
+IF BUILD FAILS:
+- Match the error against Known Issues above.
+- If matched, apply the fix (in priority order) and retry ONCE.
+- If no match or retry fails, STOP and report failure.
+- Do NOT invent new fixes beyond what is documented above.
+
+CRITICAL RULES:
+- Do NOT modify requirements.json or entity-deps.local.json
+- Do NOT modify Entity source files
+- Build only {dep}, NOT Entity
+
+Return structured result filling in the JSON template shown at the top.
+Compatibility status: {check_ver}
+Compiler: CXX={compilers.get('CXX', '')} CC={compilers.get('CC', '')}
+"""
+
+
+def _compat_prompt(req: Dict[str, Any], checkpoint: Dict[str, Any]) -> str:
+    """Assemble Agent tool prompt for compatibility verification."""
+    return f"""You are verifying dependency compatibility for an Entity build.
+You have a clean context with no prior knowledge of these files.
+
+=== REQUIREMENTS JSON ===
+{json.dumps(req, indent=2)}
+
+=== DEPENDENCY CHECKPOINT JSON ===
+{json.dumps(checkpoint, indent=2)}
+
+YOUR TASK:
+1. Read BOTH JSONs above — they are already in your context, no file reads needed.
+2. Run: python3 scripts/entity_compat.py <req-path> --checkpoint <deps-path> --no-update-json
+3. For each FAIL/WARN, independently verify by checking file paths on disk
+   (use Bash: ls, test -f, test -d).
+4. Return structured verdict:
+
+{{
+  "verdict": "pass" | "partial" | "fail",
+  "checks": [
+    {{ "name": "<check name>", "result": "PASS"|"FAIL"|"WARN", "evidence": "<found/missing>" }}
+  ],
+  "summary": "<one-line summary>",
+  "remediation": ["<action 1>", "<action 2>"]
+}}
+
+Do NOT modify any JSON files. Do NOT run cmake or build commands.
+"""
+
+
+def cmd_subagent(args: argparse.Namespace) -> None:
+    """Generate a complete Agent-tool-ready prompt for isolated sub-agent execution."""
+    req = load_json(args.requirements_json)
+    checkpoint = load_json(args.checkpoint)
+
+    if args.mode == "compat":
+        prompt = _compat_prompt(req, checkpoint)
+    else:
+        if not args.dep:
+            raise SystemExit("--dep is required for build mode (kokkos, hdf5, or adios2)")
+        dep = args.dep
+        if dep not in ("kokkos", "hdf5", "adios2"):
+            raise SystemExit(f"Unsupported dependency: {dep}. Must be kokkos, hdf5, or adios2.")
+        workdir = get_workdir(req)
+        scripts_dir = args.scripts_dir or (workdir / "deps" / "scripts")
+        notes_dir = args.notes_dir or (
+            Path(__file__).resolve().parent.parent / "references" / "dependency-notes"
+        )
+        prompt = _build_prompt(req, checkpoint, dep, Path(scripts_dir), Path(notes_dir))
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(prompt, encoding="utf-8")
+        if args.json:
+            protocol_ok("generate.subagent", output=str(args.output.resolve()), mode=args.mode)
+    else:
+        if args.json:
+            protocol_ok("generate.subagent", prompt=prompt, mode=args.mode)
+        else:
+            print(prompt)
 
 
 # ===========================================================================
@@ -694,26 +852,8 @@ def require_string(obj: Dict[str, Any], path: str) -> str:
 
 
 def default_build_dir(req: Dict[str, Any]) -> str:
-    compile_cfg = req.get("compile", {})
-    env = req.get("environment", {})
-    entity = req.get("entity", {})
-    workdir = ""
-    if isinstance(entity, dict):
-        workdir = str(entity.get("workdir") or "")
-    if not workdir:
-        workdir = os.environ.get("ENTITY_WORKDIR", "")
-    if not workdir:
-        raise SystemExit("requirements.json missing required field: entity.workdir")
-    pgen_value = compile_cfg.get("pgen") or compile_cfg.get("pgens") or "entity"
-    if isinstance(pgen_value, list):
-        pgen = ",".join(str(item) for item in pgen_value)
-    else:
-        pgen = str(pgen_value)
-    backend = str(env.get("backend") or "cpu")
-    mpi = "mpi" if env.get("mpi") else "serial"
-    intent = str(compile_cfg.get("build_intent") or "build")
-    safe = "-".join([pgen.replace("/", "-"), backend, mpi, intent])
-    return str(Path(workdir) / "build" / safe)
+    """Entity cmake build tree: problems/<pgen>/build/"""
+    return str(get_pgen_dir(req) / "build")
 
 
 def _verify_checkpoint_gate(checkpoint: Dict[str, Any], env_sh: Path) -> None:
@@ -760,12 +900,14 @@ def generate_build_script(
     if jobs:
         build_parts.extend(["-j", jobs])
 
+    log_dir = get_build_artifacts_dir(req) / "build-logs"
+
     lines = [
         "#!/usr/bin/env bash",
         "# Generated from requirements.json and env.sh. Do not edit by hand.",
         "set -euo pipefail",
         f"source {q(env_sh.resolve())}",
-        f"LOG_DIR={q(Path(workdir) / 'build-logs')}",
+        f"LOG_DIR={q(log_dir)}",
         "mkdir -p \"$LOG_DIR\"",
         f"cd {q(checkout)}",
         "# -- cmake configure --",
@@ -784,7 +926,7 @@ def generate_build_script(
     meta = {
         "configure_command": configure_cmd,
         "build_command": shell_command(build_parts),
-        "expected_executable": str(Path(checkout) / build_dir / "src" / "entity.xc"),
+        "expected_executable": str(Path(build_dir) / "src" / "entity.xc"),
     }
     return "\n".join(lines), meta
 
@@ -826,7 +968,7 @@ def cmd_build(args: argparse.Namespace) -> None:
             args.output = Path(str(artifacts["entity_build_sh"]))
         else:
             workdir = require_string(req, "entity.workdir")
-            args.output = Path(workdir) / "entity-build.sh"
+            args.output = get_build_artifacts_dir(req) / "entity-build.sh"
 
     script, meta = generate_build_script(req, args.requirements_json, args.env, run_id)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -900,6 +1042,22 @@ def main() -> None:
     p_build.add_argument("--run-id", help="Run ID for event log (auto-generated if omitted)")
     add_json_flag(p_build)
 
+    # --- subagent ---
+    p_subagent = sub.add_parser("subagent", help="Generate Agent-tool-ready prompt for isolated sub-agents")
+    p_subagent.add_argument("requirements_json", type=Path)
+    p_subagent.add_argument("--checkpoint", type=Path, required=True)
+    p_subagent.add_argument("--dep", choices=["kokkos", "hdf5", "adios2"],
+                            help="Dependency to build (build mode)")
+    p_subagent.add_argument("--mode", choices=["build", "compat"], default="build",
+                            help="Sub-agent mode: build (default) or compat")
+    p_subagent.add_argument("--notes-dir", type=Path,
+                            help="Path to references/dependency-notes (default: auto-detect)")
+    p_subagent.add_argument("--scripts-dir", type=Path,
+                            help="Path to deps/scripts (default: auto-detect)")
+    p_subagent.add_argument("--output", type=Path,
+                            help="Write prompt to file (default: stdout)")
+    add_json_flag(p_subagent)
+
     args = parser.parse_args()
 
     if args.subcommand is None:
@@ -916,6 +1074,8 @@ def main() -> None:
         cmd_env(args)
     elif args.subcommand == "build":
         cmd_build(args)
+    elif args.subcommand == "subagent":
+        cmd_subagent(args)
 
 
 if __name__ == "__main__":

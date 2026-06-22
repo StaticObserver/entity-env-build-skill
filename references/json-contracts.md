@@ -20,27 +20,31 @@ Do not reconstruct state from chat history or transient shell variables when the
 
 Require these locations before writing artifacts:
 
-- `ENTITY_CHECKOUT`: Entity source checkout.
-- `ENTITY_WORKDIR`: workspace for one problem/build configuration.
+- `ENTITY_CHECKOUT`: Entity source checkout (e.g. `$ENTITY_WORKDIR/entity-1.4.3/`).
+- `ENTITY_WORKDIR`: root of the entity workspace. Contains Entity sources, shared `deps/`, and `problems/`.
 
 Default layout:
 
 ```text
-$ENTITY_HOME/
-├── sources/<entity-version>/
-└── problems/<problem-name>/<build-name>/
-```
-
-Default artifact paths:
-
-```text
-$ENTITY_WORKDIR/requirements.json
-$ENTITY_WORKDIR/entity-deps.local.json
-$ENTITY_WORKDIR/env.sh
-$ENTITY_WORKDIR/entity-build.sh
-$ENTITY_WORKDIR/build/
-$ENTITY_WORKDIR/logs/
-$ENTITY_WORKDIR/generated/source-build-scripts/
+$ENTITY_WORKDIR/                          ← ROOT
+├── entity-<version>/                     ← ENTITY_CHECKOUT
+├── deps/                                 ← shared dependencies
+│   ├── kokkos/<version>/
+│   ├── hdf5/<version>/
+│   ├── adios2/<version>/
+│   ├── sources/                          ← dep source code
+│   └── scripts/                          ← generated build scripts
+└── problems/
+    └── <pgen>/
+        ├── build/                        ← cmake build tree
+        └── _build/                       ← tool-generated artifacts
+            ├── requirements.json
+            ├── entity-deps.local.json
+            ├── .entity-session.json
+            ├── env.sh
+            ├── entity-build.sh
+            ├── build-logs/
+            └── generated/source-builds/
 ```
 
 Keep `ENTITY_CHECKOUT` clean by default. Do not write control JSON, generated scripts, or CMake build directories into the source tree unless the user explicitly asks.

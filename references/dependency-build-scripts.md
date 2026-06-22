@@ -12,7 +12,7 @@ The build scripts should follow the same decision model as Entity's `dependencie
 - Match the Entity version profile: `legacy` uses C++17 + Kokkos 4.x + ADIOS2 2.10.x; `modern` uses C++20 + Kokkos 5.x + ADIOS2 2.11.x.
 - Build ADIOS2 with Kokkos support only for the `modern` profile.
 - For CUDA builds, use Kokkos `nvcc_wrapper` after Kokkos is installed.
-- Keep generated dependency scripts in `ENTITY_WORKDIR/generated/source-build-scripts/`.
+- Keep generated dependency scripts in `ENTITY_WORKDIR/deps/scripts/`.
 
 Official reference: https://entity-toolkit.github.io/wiki/content/1-getting-started/2-dependencies/
 
@@ -31,7 +31,7 @@ python3 scripts/entity_generate.py deps requirements.json \
 Default output directory:
 
 ```text
-$ENTITY_WORKDIR/generated/source-build-scripts/
+$ENTITY_WORKDIR/deps/scripts/
 ```
 
 Generated scripts should be reviewed before execution. They are not the source of truth; `requirements.json` and `entity-deps.local.json` are.

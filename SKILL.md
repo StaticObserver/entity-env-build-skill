@@ -103,14 +103,28 @@ Phase 3 — Entity build
 Ask the user to confirm two paths:
 
 - `ENTITY_CHECKOUT`: where the Entity source lives. Check `$ENTITY_CHECKOUT`, then ask.
-- `ENTITY_WORKDIR`: where build artifacts go. Check `$ENTITY_WORKDIR`, then ask.
+- `ENTITY_WORKDIR`: root of the entity workspace. Contains Entity source versions, shared `deps/`, and `problems/`. Check `$ENTITY_WORKDIR`, then ask.
 
-A typical layout:
-
-```text
-$ENTITY_HOME/
-├── sources/<entity-version>/
-└── problems/<problem-name>/<build-name>/
+```
+$ENTITY_WORKDIR/                          ← ROOT
+├── entity-<version>/                     ← ENTITY_CHECKOUT
+├── deps/                                 ← shared deps (multi-pgen reuse)
+│   ├── kokkos/<version>/
+│   ├── hdf5/<version>/
+│   ├── adios2/<version>/
+│   ├── sources/                          ← dep source code
+│   └── scripts/                          ← generated build scripts
+└── problems/
+    └── <pgen>/
+        ├── pgen.toml                     ← pgen config
+        ├── build/                        ← cmake build tree
+        └── _build/                       ← tool-generated artifacts
+            ├── build-logs/
+            ├── generated/source-builds/  ← dep cmake build trees
+            ├── requirements.json
+            ├── entity-deps.local.json
+            ├── env.sh
+            └── entity-build.sh
 ```
 
 After confirming both paths, initialize session state:
@@ -124,17 +138,28 @@ init_session_state(Path('$ENTITY_WORKDIR'))
 
 If `.entity-session.json` already exists from a previous incomplete session, offer to resume from the last phase. The file tracks `phase`, `completed_steps`, `build_attempts`, and artifact paths.
 
-Default artifact paths under `ENTITY_WORKDIR`:
+Default artifact paths (pgen-level, under `_build/`):
 
 ```text
-$ENTITY_WORKDIR/requirements.json
-$ENTITY_WORKDIR/entity-deps.local.json
-$ENTITY_WORKDIR/.entity-session.json
-$ENTITY_WORKDIR/env.sh
-$ENTITY_WORKDIR/entity-build.sh
-$ENTITY_WORKDIR/build/
-$ENTITY_WORKDIR/build-logs/
-$ENTITY_WORKDIR/generated/source-build-scripts/
+$PGEN_DIR/_build/
+├── requirements.json
+├── entity-deps.local.json
+├── .entity-session.json
+├── env.sh
+├── entity-build.sh
+├── build-logs/
+└── generated/
+    └── source-builds/
+```
+
+Shared paths (ROOT-level):
+```text
+$ENTITY_WORKDIR/deps/
+├── kokkos/<version>/
+├── hdf5/<version>/
+├── adios2/<version>/
+├── sources/
+└── scripts/
 ```
 
 Also: `~/.entity-env-build/site-notes/<hostname>.md` — machine-specific knowledge, generated at runtime. Read before environment probing; update after builds and discovered issues.
@@ -188,7 +213,7 @@ Example summary format:
 ```
 Build Configuration Summary:
   ENTITY_CHECKOUT:  /path/to/entity/1.3.3
-  ENTITY_WORKDIR:   /path/to/entity/problems/reconnection
+  ENTITY_WORKDIR:   /home/user                    ← ROOT
   PGen:             reconnection
   Backend:          HIP (ROCm)
   GPU Architecture: AMD_GFX906
