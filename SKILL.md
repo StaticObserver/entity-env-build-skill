@@ -39,6 +39,7 @@ Do not handle:
 - Treat the current user request as the first input. Reuse old JSON only when it satisfies the current request.
 - Require `ENTITY_CHECKOUT` and `ENTITY_WORKDIR` before writing artifacts.
 - Keep generated control files and build artifacts out of the Entity source checkout by default.
+- Do not probe the environment, search modules, inspect old checkpoints, or choose dependencies until the user has confirmed the compile configuration summary.
 - Write and validate `requirements.json` before probing or repairing dependencies.
 - Default dependency policy: system modules/packages first, then Spack, then source-build. Do not use conda for C++ build tools; conda is fine for Python tools.
 - Core dependencies are `CMake`, a C++ compiler, and `Kokkos`.
@@ -89,6 +90,28 @@ Collect user intent before probing the environment:
 - precision, deposit scheme, shape order
 - debug/tests/install options if relevant
 - dependency policy: reuse existing or allow local build
+
+Before writing `requirements.json` or running any environment command, present a compile configuration summary and wait for explicit confirmation. The summary must include at least:
+
+```text
+ENTITY_CHECKOUT:
+ENTITY_WORKDIR:
+BUILD_ARTIFACTS_DIR:
+Entity version/profile:
+PGen(s):
+Backend:
+GPU architecture:
+MPI / GPU-aware MPI:
+Output support:
+Build intent:
+Precision / deposit / shape order:
+Debug / tests / install:
+Dependency policy:
+Compiler preference, if specified:
+Dependency version pins, if specified:
+```
+
+If the user says "use defaults", list the defaults in this summary and ask for confirmation. Only after the user confirms may the agent write `requirements.json`, read old checkpoints, search modules/packages, or inspect dependency paths.
 
 Write `requirements.json` under the build-run `_build/` directory, then validate:
 

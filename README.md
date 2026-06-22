@@ -28,6 +28,10 @@ Use a pgen/build-run artifact directory such as:
 BUILD_ARTIFACTS_DIR="$ENTITY_WORKDIR/problems/<pgen>/_build"
 ```
 
+Before these commands, the agent must present the compile configuration summary
+from `SKILL.md` and wait for explicit user confirmation. Environment probing and
+old-checkpoint inspection start only after that confirmation.
+
 Typical sequence:
 
 ```bash
